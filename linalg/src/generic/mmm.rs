@@ -1,10 +1,44 @@
-use num_traits::{AsPrimitive, Zero};
+use num_traits::{AsPrimitive, Bounded, Zero};
 use std::marker::PhantomData;
 use std::{fmt, ops};
 
 use crate::frame::mmm::LinearSpec::*;
 use crate::frame::mmm::PanelStore::*;
 use crate::frame::mmm::*;
+
+use num_traits::sign::Signed;
+
+pub trait PseudoRightShift {
+    fn q_even(self, mult: Self, shift: usize) -> Self;
+    fn q_to_plus_inf(self, mult: Self, shift: usize) -> Self;
+}
+
+impl PseudoRightShift for i32 {
+    fn q_even(self, mult: Self, shift: usize) -> Self {
+        let v = ((self as i64 * mult as i64) >> (30 + shift)) as i32;
+        let truncated = v.abs();
+        let nudge = ((truncated & 0x3) == 0x3) as usize as i32;
+        let pos = (truncated + nudge) >> 1;
+        if v.is_negative() {
+            -pos
+        } else {
+            pos
+        }
+    }
+    fn q_to_plus_inf(self, mult: Self, shift: usize) -> Self {
+        let v = ((self as i64 * mult as i64) >> (30 + shift)) as i32;
+        (v + 1) >> 1
+    }
+}
+
+impl PseudoRightShift for f32 {
+    fn q_even(self, mult: Self, shift: usize) -> Self {
+        self * mult * 2f32.powi(-(shift as i32))
+    }
+    fn q_to_plus_inf(self, mult: Self, shift: usize) -> Self {
+        self * mult * 2f32.powi(-(shift as i32))
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 pub struct GenericMmm4x4<TA, TB, TC, TI>(PhantomData<(TA, TB, TC, TI)>)
@@ -16,6 +50,7 @@ where
         + ops::AddAssign
         + ops::Mul<Output = TI>
         + ops::MulAssign
+        + PseudoRightShift
         + PartialOrd
         + Zero
         + fmt::Debug
@@ -32,6 +67,7 @@ where
         + ops::AddAssign
         + ops::Mul<Output = TI>
         + ops::MulAssign
+        + PseudoRightShift
         + PartialOrd
         + Zero
         + fmt::Debug
@@ -50,6 +86,7 @@ where
         + ops::AddAssign
         + ops::Mul<Output = TI>
         + ops::MulAssign
+        + PseudoRightShift
         + PartialOrd
         + Zero
         + fmt::Debug
@@ -63,17 +100,20 @@ impl<TA, TB, TC, TI> MatMatMulKer<TA, TB, TC, TI> for GenericMmm4x4<TA, TB, TC, 
 where
     TA: Copy + fmt::Debug + AsPrimitive<TI>,
     TB: Copy + fmt::Debug + AsPrimitive<TI>,
-    TC: Copy + fmt::Debug + AsPrimitive<TI> + 'static,
+    TC: Copy + fmt::Debug + AsPrimitive<TI> + 'static + Bounded,
     TI: Copy
         + ops::AddAssign
         + ops::Mul<Output = TI>
         + ops::MulAssign
+        + PseudoRightShift
         + PartialOrd
         + Zero
+        + Signed
         + fmt::Debug
         + fmt::Display
         + AsPrimitive<TC>
         + 'static,
+    usize: AsPrimitive<TI>,
 {
     #[inline(always)]
     fn name() -> &'static str {
@@ -250,6 +290,34 @@ where
                             }
                         }
                     }
+                    FusedKerSpec::ScalarAdd(a) => {
+                        for i in 0..4 {
+                            for j in 0..4 {
+                                ab[i][j] += a;
+                            }
+                        }
+                    }
+                    FusedKerSpec::ScalarMul(a) => {
+                        for i in 0..4 {
+                            for j in 0..4 {
+                                ab[i][j] *= a;
+                            }
+                        }
+                    }
+                    FusedKerSpec::QTowardsEven(mult, shift) => {
+                        for i in 0..4 {
+                            for j in 0..4 {
+                                ab[i][j] = ab[i][j].q_even(mult, shift);
+                            }
+                        }
+                    }
+                    FusedKerSpec::QTowardsPlusInf(mult, shift) => {
+                        for i in 0..4 {
+                            for j in 0..4 {
+                                ab[i][j] = ab[i][j].q_to_plus_inf(mult, shift);
+                            }
+                        }
+                    }
                 }
                 pnl = pnl.add(1);
             }
@@ -351,17 +419,20 @@ impl<TA, TB, TC, TI> MatMatMulKer<TA, TB, TC, TI> for GenericMmmTest3x2<TA, TB, 
 where
     TA: Copy + fmt::Debug + AsPrimitive<TI>,
     TB: Copy + fmt::Debug + AsPrimitive<TI>,
-    TC: Copy + fmt::Debug + AsPrimitive<TI> + 'static,
+    TC: Copy + fmt::Debug + AsPrimitive<TI> + 'static + Bounded,
     TI: Copy
         + ops::AddAssign
         + ops::Mul<Output = TI>
         + ops::MulAssign
         + PartialOrd
+        + PseudoRightShift
         + Zero
+        + Signed
         + fmt::Debug
         + fmt::Display
         + AsPrimitive<TC>
         + 'static,
+    usize: AsPrimitive<TI>,
 {
     #[inline(always)]
     fn name() -> &'static str {
@@ -497,6 +568,34 @@ where
                             }
                         }
                     }
+                    FusedKerSpec::ScalarAdd(a) => {
+                        for i in 0..3 {
+                            for j in 0..2 {
+                                ab[i][j] += a;
+                            }
+                        }
+                    }
+                    FusedKerSpec::ScalarMul(a) => {
+                        for i in 0..3 {
+                            for j in 0..2 {
+                                ab[i][j] *= a;
+                            }
+                        }
+                    }
+                    FusedKerSpec::QTowardsEven(mult, shift) => {
+                        for i in 0..3 {
+                            for j in 0..2 {
+                                ab[i][j] = ab[i][j].q_even(mult, shift);
+                            }
+                        }
+                    }
+                    FusedKerSpec::QTowardsPlusInf(mult, shift) => {
+                        for i in 0..3 {
+                            for j in 0..2 {
+                                ab[i][j] = ab[i][j].q_to_plus_inf(mult, shift);
+                            }
+                        }
+                    }
                 }
                 pnl = pnl.add(1);
             }
@@ -527,15 +626,48 @@ where
 }
 
 #[cfg(test)]
-mod test_3_2 {
+mod test_3_2_f {
     mmm_kernel_tests!(true, crate::generic::mmm::GenericMmmTest3x2<f32, f32, f32, f32>, f32, f32, f32, f32);
+    mmm_kernel_fuse_tests!(true, crate::generic::mmm::GenericMmmTest3x2<f32, f32, f32, f32>, f32, f32, f32, f32);
     mmm_frame_tests!(true, crate::generic::mmm::GenericMmmTest3x2<f32, f32, f32, f32>, f32, f32, f32, f32);
-    qmmm_frame_tests!(true, crate::generic::mmm::GenericMmmTest3x2<i8, i8, i32, i32>);
+}
+
+#[cfg(test)]
+mod test_3_2_i8 {
+    mmm_kernel_tests!(true, crate::generic::mmm::GenericMmmTest3x2<i8, i8, i32, i32>, i8, i8, i32, i32);
+    mmm_kernel_fuse_tests!(true, crate::generic::mmm::GenericMmmTest3x2<i8, i8, i32, i32>, i8, i8, i32, i32);
+    qmmm_kernel_fuse_tests!(true, crate::generic::mmm::GenericMmmTest3x2<i8, i8, i32, i32>, i8, i8, i32, i32);
+    qmmm_frame_tests!(true, crate::generic::mmm::GenericMmmTest3x2<i8, i8, i32, i32>, i8);
+}
+
+#[cfg(test)]
+mod test_3_2_u8 {
+    mmm_kernel_tests!(true, crate::generic::mmm::GenericMmmTest3x2<u8, u8, i32, i32>, u8, u8, i32, i32);
+    mmm_kernel_fuse_tests!(true, crate::generic::mmm::GenericMmmTest3x2<u8, u8, i32, i32>, u8, u8, i32, i32);
+    qmmm_kernel_fuse_tests!(true, crate::generic::mmm::GenericMmmTest3x2<u8, u8, i32, i32>, u8, u8, i32, i32);
+    qmmm_frame_tests!(true, crate::generic::mmm::GenericMmmTest3x2<u8, u8, i32, i32>, u8);
 }
 
 #[cfg(test)]
 mod test {
     mmm_kernel_tests!(true, crate::generic::GenericMmm4x4<f32, f32, f32, f32>, f32, f32, f32, f32);
+    mmm_kernel_fuse_tests!(true, crate::generic::mmm::GenericMmm4x4<f32, f32, f32, f32>, f32, f32, f32, f32);
     mmm_frame_tests!(true, crate::generic::GenericMmm4x4<f32, f32, f32, f32>, f32, f32, f32, f32);
-    qmmm_frame_tests!(true, crate::generic::GenericMmm4x4<i8, i8, i32, i32>);
+}
+
+#[cfg(test)]
+mod test_i8 {
+    mmm_kernel_tests!(true, crate::generic::GenericMmm4x4<i8, i8, i32, i32>, i8, i8, i32, i32);
+    mmm_kernel_fuse_tests!(true, crate::generic::GenericMmm4x4<i8, i8, i32, i32>, i8, i8, i32, i32);
+    qmmm_kernel_fuse_tests!(true, crate::generic::GenericMmm4x4<i8, i8, i32, i32>, i8, i8, i32, i32);
+    qmmm_frame_tests!(true, crate::generic::GenericMmm4x4<i8, i8, i32, i32>, i8);
+
+}
+
+#[cfg(test)]
+mod test_u8 {
+    mmm_kernel_tests!(true, crate::generic::GenericMmm4x4<u8, u8, i32, i32>, u8, u8, i32, i32);
+    mmm_kernel_fuse_tests!(true, crate::generic::GenericMmm4x4<u8, u8, i32, i32>, u8, u8, i32, i32);
+    qmmm_kernel_fuse_tests!(true, crate::generic::GenericMmm4x4<u8, u8, i32, i32>, u8, u8, i32, i32);
+    qmmm_frame_tests!(true, crate::generic::GenericMmm4x4<u8, u8, i32, i32>, u8);
 }

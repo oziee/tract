@@ -81,7 +81,7 @@ impl TypedOp for PermuteAxes {
         )?))
     }
 
-    fn axes_info(&self, model: &TypedModel, node: &TypedNode) -> TractResult<AxesInfo> {
+    fn invariants(&self, model: &TypedModel, node: &TypedNode) -> TractResult<Invariants> {
         let permutation = if let Some(axes) = self.axes.clone() {
             axes
         } else {
@@ -97,6 +97,26 @@ impl TypedOp for PermuteAxes {
             })
         }
         Ok(infos.into())
+    }
+
+    fn dispose_dummy_axis(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+        axis: usize,
+    ) -> TractResult<Option<Box<dyn TypedOp>>> {
+        let permutation = if let Some(axes) = self.axes.clone() {
+            axes
+        } else {
+            (0..model.outlet_fact(node.inputs[0])?.shape.rank()).rev().collect()
+        };
+        let output_axis = permutation[axis];
+        let new_permutation = permutation
+            .into_iter()
+            .filter(|&src| axis != src)
+            .map(|dst| dst - (dst >= output_axis) as usize)
+            .collect();
+        Ok(Some(Box::new(PermuteAxes::new(Some(new_permutation)))))
     }
 
     fn pulsify(

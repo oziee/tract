@@ -1,6 +1,7 @@
 use crate::model::{OnnxOpRegister, ParsingContext};
 use crate::pb::NodeProto;
 use tract_core::internal::*;
+use tract_core::ops::quant::*;
 
 pub fn register_all_ops(reg: &mut OnnxOpRegister) {
     reg.insert("QuantizeLinear", quantize_linear);
@@ -11,7 +12,15 @@ fn quantize_linear(
     _ctx: &ParsingContext,
     node: &NodeProto,
 ) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
-    let op = QuantizeLinear::new(Some(2).filter(|_| node.get_input().len() == 3));
+    let op = QuantizeLinear::new(Some(2).filter(|_| node.input.len() == 3));
+    Ok((Box::new(op), vec![]))
+}
+
+fn dequantize_linear(
+    _ctx: &ParsingContext,
+    node: &NodeProto,
+) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
+    let op = DequantizeLinear::new(Some(2).filter(|_| node.input.len() == 3));
     Ok((Box::new(op), vec![]))
 }
 
@@ -111,33 +120,6 @@ impl InferenceRulesOp for QuantizeLinear {
     inference_op_as_op!();
 }
 
-element_wise_oop!(quantize_linear_u8, QuantizeLinearU8 {scale: f32, zero_point: u8},
-    [f32,i32] => u8 |op, xs, ys| {
-        xs.iter().zip(ys.iter_mut()).for_each(|(x,y)|
-            *y = (((*x as f32 * op.scale).round() as i32) + op.zero_point as i32) as u8
-        );
-        Ok(())
-    };
-    prefix: "onnx."
-);
-
-element_wise_oop!(quantize_linear_i8, QuantizeLinearI8 {scale: f32, zero_point: i8},
-    [f32,i32] => i8 |op, xs, ys| {
-        xs.iter().zip(ys.iter_mut()).for_each(|(x,y)|
-            *y = (((*x as f32 * op.scale).round() as i32) + op.zero_point as i32) as i8
-        );
-        Ok(())
-    };
-    prefix: "onnx."
-);
-
-fn dequantize_linear(
-    _ctx: &ParsingContext,
-    node: &NodeProto,
-) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
-    let op = DequantizeLinear::new(Some(2).filter(|_| node.get_input().len() == 3));
-    Ok((Box::new(op), vec![]))
-}
 
 #[derive(Debug, Clone, new, Default)]
 pub struct DequantizeLinear {
@@ -215,24 +197,14 @@ impl InferenceRulesOp for DequantizeLinear {
             rctensor0(0u8)
         };
         let op: Box<dyn TypedOp> = if zero_point.datum_type() == u8::datum_type() {
-            Box::new(dequantize_linear_f32(scale, zero_point.as_slice::<u8>()?[0] as i32))
+            Box::new(DequantizeLinearF32::new(scale, zero_point.as_slice::<u8>()?[0] as i32))
         } else if zero_point.datum_type() == i8::datum_type() {
-            Box::new(dequantize_linear_f32(scale, zero_point.as_slice::<i8>()?[0] as i32))
+            Box::new(DequantizeLinearF32::new(scale, zero_point.as_slice::<i8>()?[0] as i32))
         } else {
-            Box::new(dequantize_linear_f32(scale, zero_point.as_slice::<i32>()?[0] as i32))
+            Box::new(DequantizeLinearF32::new(scale, zero_point.as_slice::<i32>()?[0] as i32))
         };
         target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]]])
     }
 
     inference_op_as_op!();
 }
-
-element_wise_oop!(dequantize_linear_f32, DequantizeLinearF32 {scale: f32, zero_point: i32},
-    [i8,i32,u8] => f32 |op, xs, ys| {
-        xs.iter().zip(ys.iter_mut()).for_each(|(x,y)|
-            *y = (*x as i32 - op.zero_point) as f32 * op.scale
-        );
-        Ok(())
-    };
-    prefix: "onnx."
-);

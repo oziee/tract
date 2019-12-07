@@ -6,6 +6,9 @@ pub struct Buffer<T> {
     layout: alloc::Layout,
 }
 
+unsafe impl<T> Send for Buffer<T> {}
+unsafe impl<T> Sync for Buffer<T> {}
+
 impl<T: fmt::Debug> fmt::Debug for Buffer<T> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         write!(fmt, "{:?}", unsafe { slice::from_raw_parts(self.ptr, self.items) })
@@ -47,3 +50,10 @@ impl<T: Copy> Buffer<T> {
         buf
     }
 }
+
+impl<T: Copy> Clone for Buffer<T> {
+    fn clone(&self) -> Buffer<T> {
+        Buffer::realign_data(self, self.layout.align())
+    }
+}
+

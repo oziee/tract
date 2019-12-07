@@ -40,7 +40,8 @@ extern crate log;
 #[cfg(any(test, featutre = "conform"))]
 extern crate env_logger;
 extern crate num_traits;
-extern crate protobuf;
+extern crate prost;
+extern crate prost_types;
 #[macro_use]
 extern crate tract_core;
 #[cfg(feature = "conform")]
@@ -55,22 +56,11 @@ pub mod tensor;
 pub mod tfpb;
 
 pub use model::Tensorflow;
-use tract_core::internal::*;
 
 pub fn tensorflow() -> Tensorflow {
     let mut ops = crate::model::TfOpRegister::default();
     ops::register_all_ops(&mut ops);
     Tensorflow { op_register: ops }
-}
-
-#[deprecated(note = "Please use tensorflow().model_for_path(..)")]
-pub fn for_path(p: impl AsRef<std::path::Path>) -> TractResult<InferenceModel> {
-    tensorflow().model_for_path(p)
-}
-
-#[deprecated(note = "Please use tensorflow().model_for_read(..)")]
-pub fn for_reader<R: std::io::Read>(mut r: R) -> TractResult<InferenceModel> {
-    tensorflow().model_for_read(&mut r)
 }
 
 #[cfg(test)]

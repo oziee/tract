@@ -99,7 +99,7 @@ pub use crate::errors::*;
 /// This prelude is meant for code using tract.
 pub mod prelude {
     pub use crate::analyser::types::InferenceFact;
-    pub use crate::datum::{Datum, DatumType};
+    pub use crate::datum::{Blob, Datum, DatumType};
     pub use crate::dim::TDim;
     pub use crate::errors::*;
     pub use crate::framework::Framework;
@@ -122,7 +122,7 @@ pub mod internal {
     pub use crate::model::*;
     pub use crate::ops::element_wise::ElementWiseMiniOp;
     pub use crate::ops::{
-        check_input_arity, check_output_arity, AxesInfo, AxisInfo, Cost, InferenceOp, Op, OpState,
+        check_input_arity, check_output_arity, Invariants, AxisInfo, Cost, InferenceOp, Op, OpState,
         PulsedOp, StatefullOp, StatelessOp, Validation,
     };
     pub use crate::plan::SessionState;

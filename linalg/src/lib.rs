@@ -24,13 +24,12 @@ pub mod arm64;
 #[cfg(any(target_arch = "arm", target_arch = "armv7"))]
 pub mod arm32;
 
+pub use self::frame::lut;
 pub use self::frame::mmm;
 pub use self::frame::sigmoid;
 pub use self::frame::tanh;
-pub use self::frame::vecmatmul;
 
 pub struct Ops {
-    pub svmm: Box<dyn Fn(usize, usize) -> Box<dyn vecmatmul::VecMatMul<f32>> + Send + Sync>,
     pub smmm: Box<
         dyn Fn(usize, usize, usize) -> Box<dyn mmm::MatMatMul<f32, f32, f32, f32>> + Send + Sync,
     >,
@@ -40,15 +39,19 @@ pub struct Ops {
     pub qmmm_u8_i32: Box<
         dyn Fn(usize, usize, usize) -> Box<dyn mmm::QMatMatMul<u8, u8, i32, i32>> + Send + Sync,
     >,
+    pub qmmm_u8_u8: Box<
+        dyn Fn(usize, usize, usize) -> Box<dyn mmm::QMatMatMul<u8, u8, u8, i32>> + Send + Sync,
+    >,
+    pub qmmm_i8_i8: Box<
+        dyn Fn(usize, usize, usize) -> Box<dyn mmm::QMatMatMul<i8, i8, i8, i32>> + Send + Sync,
+    >,
     pub ssigmoid: Box<dyn Fn() -> Box<dyn sigmoid::Sigmoid<f32>> + Send + Sync>,
     pub stanh: Box<dyn Fn() -> Box<dyn tanh::Tanh<f32>> + Send + Sync>,
+    pub lut_u8: Box<dyn Fn(&[u8]) -> Box<dyn lut::Lut> + Send + Sync>,
 }
 
 pub fn generic() -> Ops {
     Ops {
-        svmm: Box::new(|k, n| {
-            Box::new(vecmatmul::PackedVecMatMul::<generic::SVecMatMul8, f32>::new(k, n))
-        }),
         smmm: Box::new(|m, k, n| {
             Box::new(mmm::MatMatMulImpl::<
                 generic::GenericMmm4x4<f32, f32, f32, f32>,
@@ -76,8 +79,27 @@ pub fn generic() -> Ops {
                 i32,
             >::new(m, k, n)))
         }),
+        qmmm_u8_u8: Box::new(|m, k, n| {
+            Box::new(mmm::QMatMatMulImpl::from(mmm::MatMatMulImpl::<
+                generic::GenericMmm4x4<u8, u8, u8, i32>,
+                u8,
+                u8,
+                u8,
+                i32,
+            >::new(m, k, n)))
+        }),
+        qmmm_i8_i8: Box::new(|m, k, n| {
+            Box::new(mmm::QMatMatMulImpl::from(mmm::MatMatMulImpl::<
+                generic::GenericMmm4x4<i8, i8, i8, i32>,
+                i8,
+                i8,
+                i8,
+                i32,
+            >::new(m, k, n)))
+        }),
         ssigmoid: Box::new(|| Box::new(sigmoid::SigmoidImpl::<generic::SSigmoid4, f32>::new())),
         stanh: Box::new(|| Box::new(tanh::TanhImpl::<generic::STanh4, f32>::new())),
+        lut_u8: Box::new(|table: &[u8]| Box::new(lut::LutImpl::<generic::GenericLut8>::new(table))),
     }
 }
 

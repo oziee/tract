@@ -84,6 +84,7 @@ where
     pub(crate) c_shape: TVec<usize>,
     pub(crate) c_prefix_dim_and_stride: Option<(TVec<usize>, TVec<isize>)>,
     pub(crate) packed_as: ArrayD<Arc<Tensor>>,
+    pub(crate) fused_ops: Option<ArrayD<Vec<FusedSpec<TI>>>>,
     pub(crate) mmm: MMMWrapper<TA, TB, TC, TI>,
 }
 
@@ -95,7 +96,7 @@ where
     TI: Datum + Copy + Add + Mul + Zero + fmt::Debug,
 {
     fn name(&self) -> Cow<str> {
-        "MatMatMul".into()
+        "MatMatMulUnaryFinite".into()
     }
 
     fn info(&self) -> TractResult<Vec<String>> {
@@ -107,6 +108,9 @@ where
             self.mmm.as_mmm().n(),
         )];
         infos.push(format!("{}", self.mmm));
+        if let Some(f) = &self.fused_ops {
+            infos.push(format!("{:?}", f));
+        }
         Ok(infos)
     }
 
@@ -150,9 +154,10 @@ where
             })()?;
             if let Some(op) = fused_micro_op {
                 let mut new_op = self.clone();
-                unsafe {
-                    new_op.mmm.as_mmm_mut().non_linear_specs_mut().extend(op.into_iter());
-                }
+                new_op
+                    .fused_ops
+                    .get_or_insert_with(|| arr0(vec![]).into_dyn())
+                    .map_inplace(|v| v.extend(op.iter().cloned()));
                 return Ok(Some(TypedModelPatch::fuse_with_next(model, &node, new_op)?));
             }
         }
@@ -189,14 +194,38 @@ where
                         c = c.offset(prefix_strides[ix] * dim as isize);
                     }
                     let pa: &Tensor = a.iter().next().unwrap();
-                    self.mmm.run(pa.as_ptr()?, b.as_ptr(), c);
+                    if let Some(fused) = &self.fused_ops {
+                        let mut fused = fused.view();
+                        for &dim in prefix.slice() {
+                            let d = dim.min(fused.shape()[0] - 1);
+                            fused.index_axis_inplace(Axis(0), d);
+                        }
+                        self.mmm.run(
+                            pa.as_ptr()?,
+                            b.as_ptr(),
+                            c,
+                            &fused.as_slice().unwrap()[0],
+                        );
+                    } else {
+                        self.mmm.run(pa.as_ptr()?, b.as_ptr(), c, &[]);
+                    }
                 }
             } else {
-                self.mmm.run(
-                    self.packed_as.as_slice().unwrap()[0].as_ptr()?,
-                    b.as_ptr()?,
-                    c.as_ptr_mut()?,
-                );
+                if let Some(fused) = &self.fused_ops {
+                    self.mmm.run(
+                        self.packed_as.as_slice().unwrap()[0].as_ptr()?,
+                        b.as_ptr()?,
+                        c.as_ptr_mut()?,
+                        &fused.as_slice().unwrap()[0],
+                    );
+                } else {
+                    self.mmm.run(
+                        self.packed_as.as_slice().unwrap()[0].as_ptr()?,
+                        b.as_ptr()?,
+                        c.as_ptr_mut()?,
+                        &[],
+                    );
+                }
             }
             Ok(tvec!(c.into_arc_tensor()))
         }

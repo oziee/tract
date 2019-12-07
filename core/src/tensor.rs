@@ -39,6 +39,14 @@ impl Default for Tensor {
 
 impl Drop for Tensor {
     fn drop(&mut self) {
+        if self.dt == DatumType::Blob {
+            unsafe {
+                self.as_slice_mut::<Blob>()
+                    .unwrap()
+                    .iter_mut()
+                    .for_each(|s| std::ptr::drop_in_place(s as *mut Blob));
+            }
+        }
         if self.dt == DatumType::String {
             unsafe {
                 self.as_slice_mut::<String>()
@@ -305,6 +313,18 @@ impl Tensor {
     /// Access the data as a scalar.
     pub fn to_scalar<'a, D: Datum>(&'a self) -> TractResult<&D> {
         unsafe { Ok(&*(self.as_ptr::<D>()?)) }
+    }
+
+    fn is_uniform_t<T:Datum>(&self) -> TractResult<bool> {
+        let slice = self.as_slice::<T>()?;
+        Ok(slice[1..].iter().all(|x| x == &slice[0]))
+    }
+
+    pub fn is_uniform(&self) -> TractResult<bool> {
+        if self.len() <= 1 {
+            return Ok(true)
+        }
+        dispatch_datum!(Tensor::is_uniform_t(self.datum_type())(self))
     }
 
     /// Convert data to a tensor for a new DatumType.

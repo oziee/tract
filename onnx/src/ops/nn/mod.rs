@@ -42,6 +42,7 @@ pub fn register_all_ops(reg: &mut OnnxOpRegister) {
     reg.insert("LRN", lrn);
     reg.insert("MaxPool", max_pool);
     reg.insert("ParametricSoftplus", parametric_softplus);
+    reg.insert("QLinearConv", conv_qlinear);
     reg.insert("PRelu", |_, _| Ok((Box::new(prelu::bin()), vec![])));
     reg.insert("ReduceL1", |_, node| reduce(node, Reducer::L1));
     reg.insert("ReduceL2", |_, node| reduce(node, Reducer::L2));
@@ -101,7 +102,7 @@ pub fn arg_max_min(
     _ctx: &ParsingContext,
     node: &NodeProto,
 ) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
-    let max = node.get_op_type() == "ArgMax";
+    let max = node.op_type == "ArgMax";
     let axis = node.get_attr_opt("axis")?.unwrap_or(0);
     let keepdims = node.get_attr_opt("keepdims")?.unwrap_or(true);
     Ok((Box::new(tractops::nn::ArgMaxMin::new(max, axis, keepdims)), vec![]))
@@ -139,7 +140,7 @@ pub fn conv(
     node: &NodeProto,
 ) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
     let mut op = common_conv(node)?;
-    if node.get_input().len() == 3 {
+    if node.input.len() == 3 {
         op = op.bias_input(2);
     }
     Ok((Box::new(op), vec![]))
@@ -157,7 +158,26 @@ pub fn conv_integer(
     if let Some(i) = options.next().unwrap() {
         op = op.k_zero_point_input(i);
     }
-    op = op.override_output_datum_type(i32::datum_type());
+    op.override_output_datum_type = Some(i32::datum_type());
+    Ok((Box::new(op), vec![]))
+}
+
+pub fn conv_qlinear(
+    _ctx: &ParsingContext,
+    node: &NodeProto,
+) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
+    let mut op = common_conv(node)?;
+    op.x_scale_input = Some(1);
+    op.x_zero_point_input = Some(2);
+    op.k_input = Some(3);
+    op.k_scale_input = Some(4);
+    op.k_zero_point_input = Some(5);
+    op.y_scale_input = Some(6);
+    op.y_zero_point_input = Some(7);
+    if node.input.len() == 9 {
+        op.bias_input = Some(8);
+    }
+    op.override_bias_datum_type = Some(i32::datum_type());
     Ok((Box::new(op), vec![]))
 }
 
@@ -256,7 +276,7 @@ pub fn max_pool(
     Ok((
         Box::new(tractops::cnn::MaxPool::new(
             tractops::cnn::PoolSpec::new(DataFormat::NCHW, kernel_shape, pad, None, strides, None),
-            if node.get_output().len() == 2 { Some(DatumType::I64) } else { None },
+            if node.output.len() == 2 { Some(DatumType::I64) } else { None },
         )),
         vec![],
     ))
@@ -271,7 +291,7 @@ pub fn parametric_softplus(
     Ok((Box::new(tractops::nn::parametric_softplus(alpha, beta)), vec![]))
 }
 
-bin_to_super_type!(prelu, Prelu, declutter: prelu_to_prelu_unary,
+bin_to_super_type!(prelu, Prelu, declutter_bin: prelu_to_prelu_unary,
   [f16,f32,f64] => |c, &a, &b| *c = if a < 0f32.into() { a * b } else { a });
 
 element_wise!(prelu_unary, PreluUnary { b: f32 },

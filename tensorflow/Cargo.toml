@@ -1,6 +1,6 @@
 [package]
 name = "tract-tensorflow"
-version = "0.5.7-pre"
+version = "0.5.8-pre"
 authors = ["Mathieu Poumeyrol <kali@zoy.org>"]
 license = "MIT/Apache-2.0"
 description = "Tiny, no-nonsense, self contained, TensorFlow and ONNX inference"
@@ -14,18 +14,20 @@ edition = "2018"
 maintenance = { status = "actively-developed" }
 
 [dependencies]
+bytes = "0.4.7"
 derive-new = "0.5"
 error-chain = "0.12"
 itertools = "0.8"
 log = "0.4"
 num-traits = "0.2"
-protobuf = "^2.8"
+prost = "0.5"
+prost-types = "0.5"
 tensorflow = { version = "0", optional = true }
 tract-core = { path = "../core" }
 tract-linalg = { path = "../linalg" }
 
 [build-dependencies]
-protobuf-codegen-pure = "2.3"
+prost-build = "0.5"
 
 [features]
 conform = [ "tensorflow" ]

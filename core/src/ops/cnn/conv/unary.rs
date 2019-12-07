@@ -17,7 +17,9 @@ use crate::ops::cnn::PoolSpec;
 use crate::ops::math::mat_mat_mul::MatMatMulUnaryFinite;
 use crate::ops::math::mat_mul::MMMWrapper;
 use crate::ops::nn::DataFormat;
+use crate::ops::quant::QParams;
 
+use tract_linalg::frame::mmm::FusedSpec;
 use tract_linalg::frame::PackA;
 
 use std::iter::Sum;
@@ -30,12 +32,18 @@ pub struct ConvUnary {
 
     pub group: usize,
 
-    pub zero_point_k: Option<Arc<Tensor>>,
-    pub zero_point_x: Option<Arc<Tensor>>,
+    pub bias: Option<Arc<Tensor>>,
+    pub q_params: Option<QParams>,
 }
 
 impl ConvUnary {
-    pub fn new(conv: &Conv, kernel: Arc<Tensor>, group: usize) -> TractResult<ConvUnary> {
+    pub fn new(
+        conv: &Conv,
+        kernel: Arc<Tensor>,
+        group: usize,
+        bias: Option<Arc<Tensor>>,
+        q_params: Option<QParams>,
+    ) -> TractResult<ConvUnary> {
         let spatial_rank = kernel.rank() - 2;
         let kshape = kernel.shape();
 
@@ -56,8 +64,8 @@ impl ConvUnary {
             kernel_fmt: conv.kernel_fmt,
             kernel,
             group,
-            zero_point_k: None,
-            zero_point_x: None,
+            bias,
+            q_params,
         };
         Ok(unary)
     }
@@ -127,6 +135,32 @@ impl ConvUnary {
         Ok(packed_as.insert_axis(Axis(0)))
     }
 
+    fn bias_as_non_linear<T>(
+        &self,
+    ) -> TractResult<Option<ArrayD<Vec<FusedSpec<T>>>>>
+    where
+        T: Datum + Copy,
+    {
+        use crate::itertools::Itertools;
+        if let Some(bias) = &self.bias {
+            let bias = bias.cast_to::<T>()?;
+            let bias = bias.as_slice::<T>()?;
+            Ok(Some(
+                Array2::from_shape_vec(
+                    (1, self.group),
+                    bias.iter()
+                        .chunks(self.output_channels() / self.group)
+                        .into_iter()
+                        .map(|c| vec![FusedSpec::PerRowAdd(c.into_iter().cloned().collect())])
+                        .collect(),
+                )?
+                .into_dyn(),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub unsafe fn wire_as_im2col_pair(
         &self,
         model: &mut TypedModel,
@@ -137,16 +171,27 @@ impl ConvUnary {
         let a = self.kernel.datum_type();
         let b = model.outlet_fact(wire)?.datum_type;
         if (a, b) == (f32::datum_type(), f32::datum_type()) {
-            self.wire_as_im2col_pair_t(model, name, wire, direct, &|m, k, n| {
+            return self.wire_as_im2col_pair_t(model, name, wire, direct, &|m, k, n| {
                 MMMWrapper::Plain((tract_linalg::ops().smmm)(m, k, n))
             })
         } else if (a, b) == (u8::datum_type(), u8::datum_type()) {
-            self.wire_as_im2col_pair_t(model, name, wire, direct, &|m, k, n| {
+            return self.wire_as_im2col_pair_t(model, name, wire, direct, &|m, k, n| {
                 MMMWrapper::Quant((tract_linalg::ops().qmmm_u8_i32)(m, k, n))
             })
-        } else {
-            bail!("Unsupported combination for Conv (filters: {:?}, data:{:?})", a, b);
+        } else if (a, b) == (i8::datum_type(), i8::datum_type()) {
+            if let Some(q) = &self.q_params {
+                if q.c_datum_type == i8::datum_type() {
+                    return self.wire_as_im2col_pair_t(model, name, wire, direct, &|m, k, n| {
+                        MMMWrapper::Quant((tract_linalg::ops().qmmm_i8_i8)(m, k, n))
+                    })
+                }
+            } else {
+                return self.wire_as_im2col_pair_t(model, name, wire, direct, &|m, k, n| {
+                    MMMWrapper::Quant((tract_linalg::ops().qmmm_i8_i32)(m, k, n))
+                })
+            }
         }
+        bail!("Unsupported combination for Conv (filters: {:?}, data:{:?})", a, b);
     }
 
     unsafe fn wire_as_im2col_pair_t<TA, TB, TC, TI>(
@@ -176,17 +221,13 @@ impl ConvUnary {
 
         let mut mmm = mmm(m, k, n);
         let (rsc, csc) = match output_shape.fmt {
-            DataFormat::NHWC => (1, (m * self.group) as isize),
+            DataFormat::NHWC => (1, self.output_channels() as isize),
             DataFormat::NCHW => (n as isize, 1),
         };
         mmm.as_mmm_mut().c_from_data_and_strides(rsc, csc);
 
-        if let Some(ref t) = self.zero_point_x {
-            mmm.set_zero_point_b(&*t)?;
-        }
-
-        if let Some(ref t) = self.zero_point_k {
-            mmm.set_zero_point_a(&*t)?;
+        if let Some(q) = self.q_params.as_ref() {
+            mmm.set_quant_params(q)?;
         }
 
         trace!("Gemm iters={} m={} k={} n={}", input_shape.n_dim() * self.group, m, k, n);
@@ -216,7 +257,9 @@ impl ConvUnary {
                     self.group,
                     c_dim / self.group,
                     mmm.as_mmm().b_pack(),
-                    self.zero_point_x.as_ref()
+                    self.q_params
+                        .as_ref()
+                        .and_then(|q| q.zero_point_b.as_ref())
                         .map(|t| t.to_scalar::<TB>().map(|x| *x))
                         .transpose()?
                         .unwrap_or(TB::default()),
@@ -243,6 +286,7 @@ impl ConvUnary {
                 c_shape: output_shape.shape.clone(),
                 c_prefix_dim_and_stride,
                 packed_as: self.kernel_as_packed_as(&mmm.as_mmm().a_pack())?,
+                fused_ops: self.bias_as_non_linear()?,
                 mmm,
             },
             &[wire],
@@ -256,11 +300,14 @@ impl ConvUnary {
         T: Datum + Clone + ::ndarray::LinalgScalar + PartialEq + Sum,
     {
         let (input_shape, patch, output_shape) = self.pool_spec.compute_geo(input_full_shape);
+        let bias =
+            if let Some(b) = self.bias.as_ref() { Some(b.as_slice::<T>()?.to_vec()) } else { None };
         let op = DepthWise::<T>::new(
             patch,
             input_shape,
             output_shape,
             self.kernel_as_group_o_ihw()?.into_dyn(),
+            bias,
         );
         Ok(Box::new(op))
     }
@@ -304,7 +351,7 @@ impl TypedOp for ConvUnary {
         self.pool_spec.output_facts(inputs)
     }
 
-    fn axes_info(&self, model: &TypedModel, node: &TypedNode) -> TractResult<AxesInfo> {
+    fn invariants(&self, model: &TypedModel, node: &TypedNode) -> TractResult<Invariants> {
         let fact = model.outlet_fact(node.inputs[0])?;
         let shape = self.pool_spec.data_format.shape(fact.shape.iter().collect::<Vec<TDim>>());
         let mut axes = vec![AxisInfo::simple(0).disposable(false)];
@@ -418,8 +465,8 @@ impl TypedOp for ConvUnary {
             kernel_fmt: self.kernel_fmt,
             kernel: kernel.into_arc_tensor(),
             group: self.group,
-            zero_point_x: self.zero_point_x.clone(),
-            zero_point_k: self.zero_point_k.clone(),
+            bias: self.bias.clone(),
+            q_params: self.q_params.clone(),
         };
         Ok(Some(Box::new(new_op)))
     }
@@ -479,8 +526,7 @@ impl TypedOp for ConvUnary {
                                 true,
                                 true,
                                 true,
-                                self.zero_point_k.clone(),
-                                self.zero_point_x.clone(),
+                                self.q_params.clone(),
                             ),
                             &[wire],
                         )?[0];
