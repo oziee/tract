@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use itertools::Itertools;
+use tract_core::itertools::Itertools;
 use tract_core::ndarray::{ArrayD, Axis};
 
 use tract_core::model::{Fact, OutletId};
@@ -10,7 +10,7 @@ use tract_core::pulse::PulsedModel;
 use crate::display_graph;
 use crate::{CliResult, Parameters};
 
-pub fn handle(params: Parameters, options: display_graph::DisplayOptions) -> CliResult<()> {
+pub fn handle(params: &Parameters, options: display_graph::DisplayOptions) -> CliResult<()> {
     let pulsed = params.tract_model.downcast_ref::<PulsedModel>().unwrap();
 
     let fixed = params.normalized_model.clone().unwrap();
@@ -48,7 +48,7 @@ pub fn handle(params: Parameters, options: display_graph::DisplayOptions) -> Cli
             let stream_dim = delay + 3 * input_pulse + input_pulse / 2;
 
             let fixed_input = crate::tensor::tensor_for_fact(
-                &fixed_input_fact.to_tensor_fact(),
+                &fixed_input_fact.to_typed_fact()?,
                 Some(stream_dim),
             )?;
 

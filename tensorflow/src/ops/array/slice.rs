@@ -1,8 +1,9 @@
-use tract_core::internal::*;
-use tract_core::ndarray;
+use tract_hir::internal::*;
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct Slice;
+
+tract_linalg::impl_dyn_hash!(Slice);
 
 impl Slice {
     pub fn eval_t<T: Datum>(
@@ -24,7 +25,7 @@ impl Slice {
                     size[i]
                 );
             }
-            input.slice_axis_inplace(ndarray::Axis(i), (b..e).into());
+            input.slice_axis_inplace(tract_ndarray::Axis(i), (b..e).into());
         }
         Ok(input.into_arc_tensor())
     }
@@ -76,5 +77,5 @@ impl InferenceRulesOp for Slice {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

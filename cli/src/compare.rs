@@ -14,7 +14,7 @@ use crate::*;
 pub fn handle_tensorflow(
     cumulative: bool,
     resilient: bool,
-    mut params: Parameters,
+    params: &mut Parameters,
     output_params: DisplayOptions,
 ) -> CliResult<()> {
     let tract = &params.tract_model;
@@ -23,7 +23,7 @@ pub fn handle_tensorflow(
     let input_facts = tract
         .input_outlets()
         .iter()
-        .map(|&i| Ok(tract.outlet_tensorfact(i)))
+        .map(|&i| tract.outlet_typedfact(i))
         .collect::<TractResult<Vec<_>>>()?;
     let generated = crate::tensor::make_inputs(&*input_facts)?;
 
@@ -83,7 +83,7 @@ pub fn handle_tensorflow(
 pub fn handle_npz(
     cumulative: bool,
     npz: &str,
-    params: Parameters,
+    params: &Parameters,
     output_params: DisplayOptions,
 ) -> CliResult<()> {
     let mut npz = ndarray_npy::NpzReader::new(std::fs::File::open(npz)?)?;
@@ -107,7 +107,7 @@ pub fn handle_npz(
 pub fn handle_pbdir(
     cumulative: bool,
     pbdir: &str,
-    params: Parameters,
+    params: &Parameters,
     output_params: DisplayOptions,
 ) -> CliResult<()> {
     let mut values: HashMap<String, CliResult<Tensor>> = HashMap::new();
@@ -127,17 +127,17 @@ pub fn handle_pbdir(
     ))
 }
 
-pub fn compare<TI, O>(
+pub fn compare<F, O>(
     cumulative: bool,
-    tract: &ModelImpl<TI, O>,
+    tract: &ModelImpl<F, O>,
     all_values: &HashMap<String, CliResult<Tensor>>,
     params: &Parameters,
     output_params: DisplayOptions,
 ) -> CliResult<()>
 where
-    TI: Fact + Clone + for<'a> From<&'a Tensor>,
-    O: AsRef<dyn Op> + AsMut<dyn Op> + Display + Debug + Clone,
-    ModelImpl<TI, O>: Model,
+    F: Fact + Clone + for<'a> From<&'a Tensor> + Hash,
+    O: AsRef<dyn Op> + AsMut<dyn Op> + Display + Debug + Clone + Hash,
+    ModelImpl<F, O>: Model,
 {
     let eval_order = ::tract_core::model::eval_order(&tract)?;
 

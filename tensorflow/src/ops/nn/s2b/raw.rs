@@ -1,10 +1,12 @@
-use tract_core::internal::*;
-use tract_core::ndarray::prelude::*;
+use tract_hir::internal::*;
+use tract_ndarray::prelude::*;
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct SpaceToBatch {
     datum_type: DatumType,
 }
+
+tract_linalg::impl_dyn_hash!(SpaceToBatch);
 
 impl Op for SpaceToBatch {
     fn name(&self) -> Cow<str> {
@@ -43,7 +45,7 @@ impl InferenceRulesOp for SpaceToBatch {
         rules(s, self.datum_type, &outputs[0], &inputs[0], &inputs[1], &inputs[2])
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -91,10 +93,12 @@ impl InferenceRulesOp for SpaceToBatch {
     }
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct BatchToSpace {
     datum_type: DatumType,
 }
+
+tract_linalg::impl_dyn_hash!(BatchToSpace);
 
 impl Op for BatchToSpace {
     fn name(&self) -> Cow<str> {
@@ -179,7 +183,7 @@ impl InferenceRulesOp for BatchToSpace {
             bail!("Need fixed block shape and padding")
         }
     }
-    inference_op_as_op!();
+    as_op!();
 }
 
 fn rules<'r, 'p: 'r>(

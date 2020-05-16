@@ -1,12 +1,14 @@
 use crate::internal::*;
 use ndarray::*;
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct ArgMaxMin {
-    max: bool,
-    axis: usize,
-    keepdims: bool,
+    pub max: bool,
+    pub axis: usize,
+    pub keepdims: bool,
 }
+
+tract_linalg::impl_dyn_hash!(ArgMaxMin);
 
 impl ArgMaxMin {
     fn eval_t<T: Datum + PartialOrd>(&self, input: Arc<Tensor>) -> TractResult<Arc<Tensor>> {
@@ -42,47 +44,6 @@ impl StatelessOp for ArgMaxMin {
     }
 }
 
-impl InferenceRulesOp for ArgMaxMin {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 1)?;
-        check_output_arity(&outputs, 1)?;
-        s.equals(&outputs[0].datum_type, DatumType::I64)?;
-        if self.keepdims {
-            s.equals(&outputs[0].rank, &inputs[0].rank)?;
-            for i in 0..self.axis {
-                s.equals(&outputs[0].shape[i], &inputs[0].shape[i])?;
-            }
-            s.equals(&outputs[0].shape[self.axis], 1.to_dim())?;
-            s.given(&inputs[0].rank, move |s, rank| {
-                for i in (self.axis + 1)..(rank as usize) {
-                    s.equals(&outputs[0].shape[i], &inputs[0].shape[i])?;
-                }
-                Ok(())
-            })?;
-        } else {
-            s.equals(&outputs[0].rank, inputs[0].rank.bex() - 1)?;
-            for i in 0..self.axis {
-                s.equals(&outputs[0].shape[i], &inputs[0].shape[i])?;
-            }
-            s.given(&inputs[0].rank, move |s, rank| {
-                for i in (self.axis + 1)..(rank as usize - 1) {
-                    s.equals(&outputs[0].shape[i], &inputs[0].shape[i + 1])?;
-                }
-                Ok(())
-            })?;
-        };
-        Ok(())
-    }
-
-    inference_op_as_op!();
-    to_typed!();
-}
-
 impl TypedOp for ArgMaxMin {
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         let mut shape = inputs[0].shape.to_tvec();
@@ -94,5 +55,5 @@ impl TypedOp for ArgMaxMin {
         Ok(tvec!(TypedFact::dt_shape(i64::datum_type(), &*shape)?))
     }
 
-    typed_op_as_op!();
+    as_op!();
 }

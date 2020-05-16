@@ -1,25 +1,32 @@
-use tract_core::ndarray;
-use tract_core::ndarray::*;
+use tract_hir::internal::*;
+use tract_ndarray::prelude::*;
 
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use tract_core::internal::*;
 
 pub fn block_lstm(_ctx: &ParsingContext, node: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     let forget_bias = node.get_attr_opt_float("forget_bias")?.unwrap_or(1.0);
     let cell_clip = node.get_attr_opt_float("cell_clip")?.unwrap_or(3.0);
     let t = node.get_attr_datum_type("T")?;
     let use_peephole = node.get_attr_opt_bool("use_peephole")?.unwrap_or(false);
+    if use_peephole {
+        unimplemented!("Block LSTM peeplholes");
+    }
     Ok(Box::new(BlockLSTM::new(forget_bias, cell_clip, t, use_peephole)))
 }
 
-#[derive(Clone, Debug, new)]
+#[derive(Clone, Debug, new, Educe)]
+#[educe(Hash)]
 pub struct BlockLSTM {
+    #[educe(Hash(method = "hash_f32"))]
     forget_bias: f32,
+    #[educe(Hash(method = "hash_f32"))]
     cell_clip: f32,
     t: DatumType,
     use_peephole: bool,
 }
+
+tract_linalg::impl_dyn_hash!(BlockLSTM);
 
 impl Op for BlockLSTM {
     fn name(&self) -> Cow<str> {
@@ -51,19 +58,14 @@ impl StatelessOp for BlockLSTM {
         let mut h_prev = h_prev.to_owned();
         let mut cs_prev = cs_prev.to_owned();
 
-        /*
-        dbg!(&h_prev);
-        dbg!(&cs_prev);
-        */
-
-        let sigmoid = (tract_linalg::ops().ssigmoid)();
+        let sigmoid = (tract_linalg::ops().sigmoid_f32)();
         let sigmoid_f32 = |f: f32| -> f32 {
             let mut f = [f];
             sigmoid.run(&mut f);
             f[0]
         };
 
-        let tanh = (tract_linalg::ops().stanh)();
+        let tanh = (tract_linalg::ops().tanh_f32)();
         let tanh_f32 = |f: f32| -> f32 {
             let mut f = [f];
             tanh.run(&mut f);
@@ -80,7 +82,7 @@ impl StatelessOp for BlockLSTM {
             let mut co = co.index_axis_mut(Axis(0), n);
             let mut h = h.index_axis_mut(Axis(0), n);
 
-            let xh = ndarray::stack(Axis(1), &[x, h_prev.view()])?;
+            let xh = tract_ndarray::stack(Axis(1), &[x, h_prev.view()])?;
 
             let i_ci_f_o = xh.dot(&w) + &bias;
 
@@ -109,6 +111,7 @@ impl StatelessOp for BlockLSTM {
             h_prev *= &o;
             h.assign(&h_prev);
         }
+
         if x.shape()[0] > len as usize {
             i.slice_axis_mut(Axis(0), (len..).into()).fill(0.0);
             cs.slice_axis_mut(Axis(0), (len..).into()).fill(0.0);
@@ -169,14 +172,207 @@ impl InferenceRulesOp for BlockLSTM {
         Ok(7)
     }
 
-    inference_op_as_op!();
+    as_op!();
     to_typed!();
 }
 
+macro_rules! some_or_else {
+    ($exp: expr) => {
+        if let Some(it) = $exp {
+            it
+        } else {
+            return Ok(None);
+        }
+    };
+}
+
 impl TypedOp for BlockLSTM {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         Ok(std::iter::repeat(inputs[1].clone()).take(7).collect())
     }
+
+    fn declutter(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+    ) -> TractResult<Option<TypedModelPatch>> {
+        use tract_hir::tract_core::ops::{array, math, matmul, nn, scan};
+
+        let mut body = TypedModel::default();
+        let mut patch = TypedModelPatch::default();
+        let mut outer_inputs = vec![];
+        let mut input_mapping = vec![];
+        let mut output_mapping = vec![];
+
+        /*
+        dbg!(&model.node_input_facts(node.id));
+        let cs_initializer = some_or_else!(self.inline_var_assign(model, node, 2, 1, &mut patch)?);
+        dbg!(&cs_initializer);
+        let h_initializer = some_or_else!(self.inline_var_assign(model, node, 3, 6, &mut patch)?);
+        dbg!(&h_initializer);
+        */
+        let w = some_or_else!(model.outlet_fact(node.inputs[4])?.konst.clone());
+        let b = some_or_else!(model.outlet_fact(node.inputs[8])?.konst.clone());
+        let cell_size = w.shape()[1] / 4;
+        let mut b = b.into_tensor();
+        b.insert_axis(0)?;
+
+        macro_rules! wire {
+            ($name: ident = $op: expr, $($param: expr),*) => {
+                let $name = body.wire_node(
+                    format!("{}-{}", node.name, stringify!($name)),
+                    $op, [$($param),*].as_ref())?[0];
+            }
+        };
+
+        let seq_len = patch.tap_model(model, node.inputs[0])?;
+        outer_inputs.push(seq_len);
+
+        // X: body input 0: X, new outside input 0 (was 1)
+        let outside_x = patch.tap_model(model, node.inputs[1])?;
+        outer_inputs.push(outside_x);
+        input_mapping.push(scan::InputMapping::Scan { slot: 1, axis: 0, chunk: 1.to_dim() });
+        let mut x_source_fact = model.outlet_fact(node.inputs[1])?.clone();
+        x_source_fact.shape.set_dim(0, 1.to_dim())?;
+        let x_source = body.add_source("x_source", x_source_fact)?.into();
+        wire!(x = AxisOp::Rm(0), x_source);
+
+        // CS: body input 1
+        let cs = patch.tap_model(model, node.inputs[2])?;
+        let cs = patch.wire_node(format!("{}-cs-axis", node.name), AxisOp::Add(0), &[cs])?[0];
+        outer_inputs.push(cs);
+        let cs_fact = patch.outlet_fact(cs)?.clone();
+        let cs_source = body.add_source("cs_source", cs_fact)?;
+        input_mapping
+            .push(scan::InputMapping::State { initializer: scan::StateInitializer::FromInput(2) });
+        wire!(cs_prev = AxisOp::Rm(0), cs_source);
+
+        // H: body input 2
+        let h = patch.tap_model(model, node.inputs[3])?;
+        let h = patch.wire_node(format!("{}-h-axis", node.name), AxisOp::Add(0), &[h])?[0];
+        outer_inputs.push(h);
+        let h_fact = patch.outlet_fact(h)?.clone();
+        let h_source = body.add_source("h_source", h_fact)?;
+        input_mapping
+            .push(scan::InputMapping::State { initializer: scan::StateInitializer::FromInput(3) });
+        wire!(h_prev = AxisOp::Rm(0), h_source);
+
+        wire!(xh = array::TypedConcat::concat_vars(1, 2), x, h_prev);
+
+        wire!(i_ci_f_o_1 = matmul::logic::MatMulUnary::new(w, true, true, true, None), xh);
+        wire!(i_ci_f_o = math::add::unary(b.into_arc_tensor()), i_ci_f_o_1);
+
+        wire!(i_1 = array::Slice::new(1, 0, cell_size), i_ci_f_o);
+        wire!(i = nn::sigmoid(), i_1);
+
+        wire!(f_1 = array::Slice::new(1, 2 * cell_size, 3 * cell_size), i_ci_f_o);
+        wire!(f_2 = math::add::unary(rctensor2(&[[self.forget_bias]])), f_1);
+        wire!(f = nn::sigmoid(), f_2);
+
+        wire!(ci_1 = array::Slice::new(1, cell_size, 2 * cell_size), i_ci_f_o);
+        wire!(ci = math::tanh(), ci_1);
+
+        wire!(o_1 = array::Slice::new(1, 3 * cell_size, 4 * cell_size), i_ci_f_o);
+        wire!(o = nn::sigmoid(), o_1);
+
+        wire!(ci_i = math::mul::bin_typed(), ci, i);
+        wire!(cs_1 = math::mul::bin_typed(), cs_prev, f);
+        wire!(cs = math::add::bin_typed(), cs_1, ci_i);
+
+        wire!(co = math::tanh(), cs);
+        wire!(h = math::mul::bin_typed(), co, o);
+
+        wire!(i_ = AxisOp::Add(0), i);
+        wire!(cs_ = AxisOp::Add(0), cs);
+        wire!(f_ = AxisOp::Add(0), f);
+        wire!(o_ = AxisOp::Add(0), o);
+        wire!(ci_ = AxisOp::Add(0), ci);
+        wire!(co_ = AxisOp::Add(0), co);
+        wire!(h_ = AxisOp::Add(0), h);
+        body.set_output_outlets(&[i_, cs_, f_, o_, ci_, co_, h_])?;
+        for ix in 0..7 {
+            output_mapping.push(scan::OutputMapping::<TDim, TDim> {
+                state: ix == 1 || ix == 6,
+                axis: 0,
+                chunk: 1.into(),
+                full_dim_hint: None,
+                last_value_slot: None,
+                full_slot: Some(ix),
+            })
+        }
+
+        let scan = scan::TypedScan::new(body, input_mapping, output_mapping, Some(0))?;
+        let scan = patch.wire_node(&*node.name, scan, &*outer_inputs)?;
+
+        for (ix, o) in scan.iter().enumerate() {
+            patch.shunt_outside(model, (node.id, ix).into(), *o)?
+        }
+
+        Ok(Some(patch))
+    }
 }
+
+/* 
+// TODO: rewrite this logic as a tf.Assign declutter ?
+impl BlockLSTM {
+    fn inline_var_assign(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+        input_id: usize,
+        output_id: usize,
+        patch: &mut TypedModelPatch,
+    ) -> TractResult<Option<Arc<Tensor>>> {
+        let var_2 = model.node(node.inputs[input_id].node);
+        let var_2_op = if let Some(op) = var_2.op_as::<crate::ops::vars::VariableV2>() {
+            op
+        } else {
+            return Ok(None);
+        };
+        if var_2.outputs[0].successors.len() != 2 {
+            return Ok(None);
+        }
+        let assign = if let Some(assign_node) = var_2.outputs[0]
+            .successors
+            .iter()
+            .map(|s| model.node(s.node))
+            .filter(|s| s.op_is::<crate::ops::vars::Assign>())
+            .next()
+        {
+            assign_node
+        } else {
+            return Ok(None);
+        };
+        let rm_axis_node = model.node(assign.inputs[1].node);
+        let rm_axis_op = if let Some(op) = rm_axis_node.op_as::<tract_hir::internal::AxisOp>() {
+            op
+        } else {
+            return Ok(None);
+        };
+        if rm_axis_op != &tract_hir::internal::AxisOp::Rm(0) {
+            return Ok(None);
+        }
+        let slice_node = model.node(rm_axis_node.inputs[0].node);
+        let slice_op = if let Some(op) = slice_node.op_as::<tract_hir::ops::array::Slice<usize>>() {
+            op
+        } else {
+            return Ok(None);
+        };
+        if slice_node.inputs[0] != (node.id, output_id).into() {
+            return Ok(None);
+        }
+        let lstm_output_fact = model.outlet_fact(slice_node.inputs[0])?;
+        if slice_op.axis != 0
+            || slice_op.end != slice_op.start + 1
+            || slice_op.end.to_dim() != lstm_output_fact.shape.dim(0)
+        {
+            return Ok(None);
+        }
+        let tap = patch.tap_model(model, rm_axis_node.id.into())?;
+        patch.shunt_outside(model, assign.id.into(), tap)?;
+        Ok(var_2_op.initializer.clone())
+    }
+}
+*/

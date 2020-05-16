@@ -1,13 +1,15 @@
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 pub fn gather_v2(_ctx: &ParsingContext, _pb: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     Ok(Box::new(GatherV2::new()))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct GatherV2 {}
+
+tract_linalg::impl_dyn_hash!(GatherV2);
 
 impl Op for GatherV2 {
     fn name(&self) -> Cow<str> {
@@ -20,7 +22,7 @@ impl Op for GatherV2 {
 impl StatelessOp for GatherV2 {
     fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
         let (input, indices, axis) = args_3!(inputs);
-        let op = tract_core::ops::array::Gather::new(*axis.to_scalar::<i32>()? as i64);
+        let op = tract_hir::ops::array::Gather::new(*axis.to_scalar::<i32>()? as i64);
         op.eval(tvec!(input, indices))
     }
 }
@@ -43,7 +45,7 @@ impl InferenceRulesOp for GatherV2 {
             &inputs[1].shape,
             &inputs[2].value,
             move |s, input_shape, indices_shape, axis| {
-                let op = tract_core::ops::array::Gather::new(*axis.to_scalar::<i32>()? as i64);
+                let op = tract_hir::ops::array::Gather::new(*axis.to_scalar::<i32>()? as i64);
                 let output_shape = op.compute_output_shape(&input_shape, &indices_shape)?;
                 s.equals(&outputs[0].shape, output_shape)
             },
@@ -58,12 +60,12 @@ impl InferenceRulesOp for GatherV2 {
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
         if let Some(axis) = target.outlet_fact(mapping[&node.inputs[2]])?.konst.as_ref() {
-            let op = tract_core::ops::array::Gather::new(*axis.to_scalar::<i32>()? as i64);
+            let op = tract_hir::ops::array::Gather::new(*axis.to_scalar::<i32>()? as i64);
             target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]], mapping[&node.inputs[1]]])
         } else {
             bail!("Need to know axis to type GatherV2")
         }
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

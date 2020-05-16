@@ -1,7 +1,7 @@
 use crate::model::ParsingContext;
 use crate::pb::*;
-use tract_core::internal::*;
-use tract_core::ops::quant::QParams;
+use tract_hir::internal::*;
+use tract_hir::ops::quant::QParams;
 
 pub fn mat_mul_integer(
     _ctx: &ParsingContext,
@@ -25,11 +25,13 @@ fn cleanup_zero_point(mut t: Tensor) -> TractResult<Option<Tensor>> {
     }
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 struct MatMulInteger {
     pub optional_a_zero_point_input: Option<usize>,
     pub optional_b_zero_point_input: Option<usize>,
 }
+
+tract_linalg::impl_dyn_hash!(MatMulInteger);
 
 impl Op for MatMulInteger {
     fn name(&self) -> Cow<str> {
@@ -52,7 +54,7 @@ impl StatelessOp for MatMulInteger {
                 qp = qp.with_zero_point_b(&zp.into_arc_tensor());
             }
         }
-        let op = tract_core::ops::math::mat_mul::MatMul::default().with_q_params(qp);
+        let op = tract_hir::ops::matmul::MatMul::default().with_q_params(qp);
         op.eval(inputs)
     }
 }
@@ -78,8 +80,8 @@ impl InferenceRulesOp for MatMulInteger {
             s.equals(&inputs[b_zp].datum_type, &inputs[1].datum_type)?
         }
         s.given_2(&inputs[0].shape, &inputs[1].shape, move |s, ashape, bshape| {
-            let (_, _, cshape) =
-                tract_core::ops::math::mat_mul::infer_shapes(ashape, bshape, false, false, false)?;
+            let (_, _, cshape, _) =
+                tract_hir::ops::matmul::compute_shapes(ashape, bshape, false, false, false)?;
             s.equals(&outputs[0].shape, cshape)
         })?;
         Ok(())
@@ -113,11 +115,11 @@ impl InferenceRulesOp for MatMulInteger {
                 qp = qp.with_zero_point_b(&zp.into_arc_tensor());
             }
         };
-        let op = tract_core::ops::math::mat_mul::MatMul::default().with_q_params(qp);
+        let op = tract_hir::ops::matmul::MatMul::default().with_q_params(qp);
         target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]], mapping[&node.inputs[1]]])
     }
 
-    inference_op_as_op!();
+    as_op!();
 }
 
 pub fn q_linear_mat_mul(
@@ -127,8 +129,10 @@ pub fn q_linear_mat_mul(
     Ok((Box::new(QLinearMatMul), vec![]))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 struct QLinearMatMul;
+
+tract_linalg::impl_dyn_hash!(QLinearMatMul);
 
 impl Op for QLinearMatMul {
     fn name(&self) -> Cow<str> {
@@ -153,7 +157,7 @@ impl StatelessOp for QLinearMatMul {
         if let Some(zp) = cleanup_zero_point(y_zp.into_tensor())? {
             qp = qp.with_zero_point_c(&zp.into_arc_tensor())
         }
-        let op = tract_core::ops::math::mat_mul::MatMul::default().with_q_params(qp);
+        let op = tract_hir::ops::matmul::MatMul::default().with_q_params(qp);
         op.eval(tvec!(a, b))
     }
 }
@@ -177,8 +181,8 @@ impl InferenceRulesOp for QLinearMatMul {
         s.equals(&inputs[4].rank, &inputs[5].rank)?;
         s.equals(&inputs[6].rank, &inputs[7].rank)?;
         s.given_2(&inputs[0].shape, &inputs[3].shape, move |s, ashape, bshape| {
-            let (_, _, cshape) =
-                tract_core::ops::math::mat_mul::infer_shapes(ashape, bshape, false, false, false)?;
+            let (_, _, _, cshape) =
+                tract_hir::ops::matmul::compute_shapes(ashape, bshape, false, false, false)?;
             s.equals(&outputs[0].shape, cshape)
         })?;
         Ok(())
@@ -208,9 +212,9 @@ impl InferenceRulesOp for QLinearMatMul {
         if let Some(zp) = cleanup_zero_point(b_zp.clone().into_tensor())? {
             qp = qp.with_zero_point_b(&zp.into_arc_tensor());
         }
-        let op = tract_core::ops::math::mat_mul::MatMul::default().with_q_params(qp);
+        let op = tract_hir::ops::matmul::MatMul::default().with_q_params(qp);
         target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]], mapping[&node.inputs[3]]])
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

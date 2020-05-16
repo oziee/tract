@@ -1,4 +1,5 @@
-use tract_core::internal::*;
+use tract_hir::internal::*;
+use tract_hir::ops;
 
 use crate::model::ParsingContext;
 use crate::model::TfOpRegister;
@@ -17,10 +18,22 @@ fn fake_quant_with_min_max_vars(
     Ok(Box::new(FakeQuantWithMinMaxVars::new(narrow_range, num_bits)))
 }
 
-#[derive(Clone, Debug, new)]
+#[derive(Clone, Debug, new, Hash)]
 struct FakeQuantWithMinMaxVars {
     narrow_range: bool,
     num_bits: usize,
+}
+
+tract_linalg::impl_dyn_hash!(FakeQuantWithMinMaxVars);
+
+impl FakeQuantWithMinMaxVars {
+    fn step(&self, min: &Tensor, max: &Tensor) -> TractResult<f32> {
+        let min = min.to_scalar::<f32>()?;
+        let max = max.to_scalar::<f32>()?;
+        let amplitude = max - min;
+        let scale_len = 2_usize.pow(self.num_bits as u32) - 1 - self.narrow_range as usize;
+        Ok(amplitude / scale_len as f32)
+    }
 }
 
 impl Op for FakeQuantWithMinMaxVars {
@@ -28,17 +41,14 @@ impl Op for FakeQuantWithMinMaxVars {
         "tf.FakeQuantWithMinMaxVars".into()
     }
 
-    op_as_typed_op!();
+    not_a_typed_op!();
 }
 
 impl StatelessOp for FakeQuantWithMinMaxVars {
     fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
         let (input, min, max) = args_3!(inputs);
+        let step = self.step(&min, &max)?;
         let min = min.to_scalar::<f32>()?;
-        let max = max.to_scalar::<f32>()?;
-        let amplitude = max - min;
-        let scale_len = 2_usize.pow(self.num_bits as u32) - 1 - self.narrow_range as usize;
-        let step = amplitude / scale_len as f32;
         let mut tensor = input.into_tensor().into_array::<f32>()?;
         tensor.mapv_inplace(|v| ((v - min) / step).round() * step + min);
         Ok(tvec!(tensor.into_arc_tensor()))
@@ -56,21 +66,61 @@ impl InferenceRulesOp for FakeQuantWithMinMaxVars {
         check_output_arity(&outputs, 1)?;
         s.equals(&inputs[0].datum_type, &inputs[1].datum_type)?;
         s.equals(&inputs[0].datum_type, &inputs[2].datum_type)?;
-        s.equals(&inputs[1].shape, shapefact!())?;
-        s.equals(&inputs[2].shape, shapefact!())?;
+        s.equals(&inputs[1].shape, shapefactoid!())?;
+        s.equals(&inputs[2].shape, shapefactoid!())?;
         s.equals(&inputs[0].datum_type, &outputs[0].datum_type)?;
         s.equals(&inputs[0].shape, &outputs[0].shape)?;
         Ok(())
     }
 
-    inference_op_as_op!();
-    to_typed!();
-}
-
-impl TypedOp for FakeQuantWithMinMaxVars {
-    typed_op_as_op!();
-
-    fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
-        Ok(tvec!(TypedFact::dt_shape(f32::datum_type(), inputs[0].shape.clone())?))
+    fn to_typed(
+        &self,
+        _source: &InferenceModel,
+        node: &InferenceNode,
+        target: &mut TypedModel,
+        mapping: &HashMap<OutletId, OutletId>,
+    ) -> TractResult<TVec<OutletId>> {
+        if let (Some(min), Some(max)) = (
+            target.outlet_fact(mapping[&node.inputs[1]])?.konst.as_ref(),
+            target.outlet_fact(mapping[&node.inputs[2]])?.konst.as_ref(),
+        ) {
+            let rank = target.outlet_fact(mapping[&node.inputs[0]])?.rank();
+            let step = self.step(&min, &max)?;
+            let min = *min.to_scalar::<f32>()?;
+            let bc = |v| -> TractResult<Arc<Tensor>> {
+                let mut t = tensor0(v);
+                while t.rank() < rank {
+                    t.insert_axis(0)?;
+                }
+                Ok(t.into_arc_tensor())
+            };
+            let wire = mapping[&node.inputs[0]];
+            let wire = target.wire_node(
+                format!("{}-sub-min", &*node.name),
+                ops::math::add::unary(bc(-min)?),
+                &[wire],
+            )?[0];
+            let wire = target.wire_node(
+                format!("{}-div-step", &*node.name),
+                ops::math::mul::unary(bc(step.recip())?),
+                &[wire],
+            )?[0];
+            let wire =
+                target.wire_node(format!("{}-round", &*node.name), ops::math::round(), &[wire])?[0];
+            let wire = target.wire_node(
+                format!("{}-mul-step", &*node.name),
+                ops::math::mul::unary(bc(step)?),
+                &[wire],
+            )?[0];
+            let wire = target.wire_node(
+                format!("{}-add-min", &*node.name),
+                ops::math::add::unary(bc(min)?),
+                &[wire],
+            )?[0];
+            return Ok(tvec!(wire));
+        }
+        bail!("Operator can not be made a TypedOp.")
     }
+
+    as_op!();
 }

@@ -1,4 +1,4 @@
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 use crate::model::ParsingContext;
 use crate::model::TfOpRegister;
@@ -26,14 +26,14 @@ pub fn register_all_ops(reg: &mut TfOpRegister) {
     vars::register_all_ops(reg);
     reg.insert("Cast", cast);
     reg.insert("Const", konst);
-    reg.insert("Identity", |_, _| Ok(Box::new(tract_core::ops::identity::Identity)));
+    reg.insert("Identity", |_, _| Ok(Box::new(tract_hir::ops::identity::Identity)));
     reg.insert("NoOp", |_, _| Ok(Box::new(Noop)));
-    reg.insert("Placeholder", |_, _| Ok(Box::new(::tract_core::ops::source::Source::new())));
+    reg.insert("Placeholder", |_, _| Ok(Box::new(tract_hir::ops::source::Source::new())));
 }
 
 fn cast(_ctx: &ParsingContext, node: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     let dtype = node.get_attr_datum_type("DstT")?;
-    Ok(Box::new(::tract_core::ops::cast::Cast::new(dtype)))
+    Ok(Box::new(::tract_hir::ops::cast(dtype)))
 }
 
 fn konst(_ctx: &ParsingContext, node: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
@@ -44,11 +44,13 @@ fn konst(_ctx: &ParsingContext, node: &NodeDef) -> TractResult<Box<dyn Inference
         bail!("Const node {:?} doesn't have the expected {:?} type.", mat, dtype);
     }
 
-    Ok(Box::new(::tract_core::ops::konst::Const::for_tensor(mat)))
+    Ok(Box::new(::tract_hir::ops::konst::Const(mat.into())))
 }
 
-#[derive(Clone, Debug, new)]
+#[derive(Clone, Debug, new, Hash)]
 pub struct Noop;
+
+tract_linalg::impl_dyn_hash!(Noop);
 
 impl Op for Noop {
     fn name(&self) -> Cow<str> {
@@ -77,7 +79,7 @@ impl InferenceRulesOp for Noop {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
     to_typed!();
 }
 
@@ -86,5 +88,5 @@ impl TypedOp for Noop {
         Ok(tvec!(TypedFact::dt_shape(bool::datum_type(), ())?))
     }
 
-    typed_op_as_op!();
+    as_op!();
 }

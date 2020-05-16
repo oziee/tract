@@ -1,10 +1,11 @@
 use crate::internal::*;
 use ndarray::*;
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct Gather {
     axis: i64,
 }
+tract_linalg::impl_dyn_hash!(Gather);
 
 impl Op for Gather {
     fn name(&self) -> Cow<str> {
@@ -64,11 +65,12 @@ impl Gather {
                 .into_arc_tensor());
         }
 
-        let mut output: Array<T, _> = unsafe {
-            T::uninitialized_array(&*self.compute_output_shape(data.shape(), indices.shape())?)
+        let mut output = unsafe {
+            Tensor::uninitialized::<T>(&*self.compute_output_shape(data.shape(), indices.shape())?)?
         };
-        for (pattern, index) in indices.to_array_view::<i64>()?.indexed_iter() {
-            {
+        {
+            let mut output = output.to_array_view_mut::<T>()?;
+            for (pattern, index) in indices.to_array_view::<i64>()?.indexed_iter() {
                 let mut to_update = output.index_axis_mut(Axis(axis), pattern[0]);
                 for idx in 1..pattern.ndim() {
                     to_update = to_update.index_axis_move(Axis(0), pattern[idx]);
@@ -82,7 +84,7 @@ impl Gather {
 }
 
 impl TypedOp for Gather {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         Ok(tvec!(TypedFact::dt_shape(
@@ -99,30 +101,6 @@ impl StatelessOp for Gather {
         let (data, indices) = args_2!(inputs);
         Ok(tvec!(dispatch_datum!(Self::eval_t(data.datum_type())(&self, data, &indices))?))
     }
-}
-
-impl InferenceRulesOp for Gather {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 2)?;
-        check_output_arity(&outputs, 1)?;
-        s.equals(&inputs[0].datum_type, &outputs[0].datum_type)?;
-        s.equals(&inputs[1].datum_type, i64::datum_type())?;
-        s.equals(inputs[0].rank.bex() - 1 + inputs[1].rank.bex(), outputs[0].rank.bex())?;
-        s.given_2(&inputs[0].shape, &inputs[1].shape, move |s, input_shape, indices_shape| {
-            let output_shape = self.compute_output_shape(&*input_shape, &*indices_shape)?;
-            s.equals(&outputs[0].shape, output_shape)?;
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    inference_op_as_op!();
-    to_typed!();
 }
 
 #[cfg(test)]

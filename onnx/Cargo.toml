@@ -1,6 +1,6 @@
 [package]
 name = "tract-onnx"
-version = "0.5.8-pre"
+version = "0.6.4-pre"
 authors = ["Mathieu Poumeyrol <kali@zoy.org>"]
 license = "MIT/Apache-2.0"
 description = "Tiny, no-nonsense, self contained, TensorFlow and ONNX inference"
@@ -14,17 +14,16 @@ edition = "2018"
 maintenance = { status = "actively-developed" }
 
 [dependencies]
-bytes = "0.4.7"
+bytes = "0.5"
 derive-new = "0.5"
+educe = "0.4"
 error-chain = "0.12"
-itertools = "0.8"
 log = "0.4"
+memmap = "0.7"
 num-integer = "0.1"
-num-traits = "0.2"
-prost = "0.5"
-smallvec = "0.6"
-tract-core = { path = "../core" }
-tract-linalg = { path = "../linalg" }
+prost = "0.6"
+smallvec = "1"
+tract-hir = { path = "../hir" }
 
 [build-dependencies]
-prost-build = "0.5"
+prost-build = "0.6"

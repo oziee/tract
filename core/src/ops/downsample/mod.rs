@@ -6,11 +6,11 @@ mod array;
 mod conv;
 mod scan;
 
-#[derive(Debug, Clone, new, Default, PartialEq)]
+#[derive(Debug, Clone, new, Default, PartialEq, Hash)]
 pub struct Downsample {
-    axis: usize,
-    stride: usize,
-    modulo: usize,
+    pub axis: usize,
+    pub stride: usize,
+    pub modulo: usize,
 }
 
 impl Downsample {
@@ -33,7 +33,7 @@ impl Downsample {
     }
 
     pub(crate) fn transform_dim(&self, input_dim: &TDim) -> TDim {
-        (input_dim.clone() - self.modulo).div_ceil(self.stride.into())
+        (input_dim.clone() - self.modulo).div_ceil(self.stride as u32)
     }
 
     pub(crate) fn transform_fact(&self, input_fact: &TypedFact) -> TractResult<TypedFact> {
@@ -43,6 +43,8 @@ impl Downsample {
         Ok(downed)
     }
 }
+
+tract_linalg::impl_dyn_hash!(Downsample);
 
 impl Op for Downsample {
     fn name(&self) -> Cow<str> {
@@ -63,38 +65,6 @@ impl StatelessOp for Downsample {
         let input = args_1!(inputs);
         Ok(tvec!(dispatch_datum!(Self::eval_t(input.datum_type())(self, &*input))?))
     }
-}
-
-impl InferenceRulesOp for Downsample {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 1)?;
-        check_output_arity(&outputs, 1)?;
-        s.equals(&inputs[0].rank, &outputs[0].rank)?;
-        s.equals(&inputs[0].datum_type, &outputs[0].datum_type)?;
-        s.given(&inputs[0].rank, move |s, r| {
-            for i in 0..(r as usize) {
-                if i == self.axis {
-                    s.given(&inputs[0].shape[i], move |s, d| {
-                        s.equals(
-                            &outputs[0].shape[i],
-                            (d - self.modulo).div_ceil(self.stride.to_dim()),
-                        )
-                    })?
-                } else {
-                    s.equals(&inputs[0].shape[i], &outputs[0].shape[i])?
-                }
-            }
-            Ok(())
-        })
-    }
-
-    inference_op_as_op!();
-    to_typed!();
 }
 
 impl TypedOp for Downsample {
@@ -132,18 +102,18 @@ impl TypedOp for Downsample {
         target.wire_node(&*node.name, self.clone(), &[input])
     }
 
-    typed_op_as_op!();
+    as_op!();
 }
 
 impl PulsedOp for Downsample {
     fn pulsed_output_facts(&self, inputs: &[&PulsedFact]) -> TractResult<TVec<PulsedFact>> {
         let mut fact = inputs[0].clone();
         fact.shape[self.axis] /= self.stride;
-        fact.dim = fact.dim.div_ceil(self.stride.to_dim());
+        fact.dim = fact.dim.div_ceil(self.stride as u32);
         Ok(tvec!(fact))
     }
 
-    pulsed_op_as_op!();
+    as_op!();
     pulsed_op_to_typed_op!();
 }
 
@@ -155,7 +125,17 @@ fn pull_downsample_up(
     if let Some(prec) = model.single_prec(down_node.id)? {
         let invariants = prec.op.invariants(model, prec)?;
         debug!("Consider pull {:?} over {:?} (invariants: {:?})", down_op, prec, invariants);
-        if let Some(above_axis) = invariants.unary_track_axis_up(down_op.axis, true) {
+        if let Some(crop_op) = prec.op_as::<ops::array::Slice<TDim>>() {
+            return array::pull_downsample_over_slice(model, prec, crop_op, down_node, down_op);
+        } else if let Some(crop_op) = prec.op_as::<ops::array::Slice<usize>>() {
+            return array::pull_downsample_over_slice(model, prec, crop_op, down_node, down_op);
+        } else if let Some(other_op) = prec.op_as::<AxisOp>() {
+            return array::pull_downsample_over_axis_op(model, prec, other_op, down_node, down_op);
+        } else if let Some(conv_op) = prec.op_as::<ops::cnn::conv::ConvUnary>() {
+            return conv::fuse_downsample_into_conv(model, prec, conv_op, down_node, down_op);
+        } else if let Some(other_op) = prec.op_as::<ops::scan::TypedScan>() {
+            return scan::pull_downsample_over_scan(model, prec, other_op, down_node, down_op);
+        } else if let Some(above_axis) = invariants.unary_track_axis_up(down_op.axis, false) {
             let mut patch = TypedModelPatch::default();
             let mut inputs = vec![];
             for (ix, &oo) in prec.inputs.iter().enumerate() {
@@ -166,20 +146,8 @@ fn pull_downsample_up(
                 inputs.push(ds[0]);
             }
             let other = patch.wire_node(&*prec.name, prec.op.clone(), &*inputs)?;
-            patch.shunt_outside(OutletId::new(down_node.id, 0), other[0])?;
+            patch.shunt_outside(model, OutletId::new(down_node.id, 0), other[0])?;
             return Ok(Some(patch));
-        } else if let Some(crop_op) = prec.op_as::<ops::array::Slice<TDim>>() {
-            return array::pull_downsample_over_slice(model, prec, crop_op, down_node, down_op);
-        } else if let Some(crop_op) = prec.op_as::<ops::array::Slice<usize>>() {
-            return array::pull_downsample_over_slice(model, prec, crop_op, down_node, down_op);
-        } else if let Some(other_op) = prec.op_as::<ops::array::RmDims>() {
-            return array::pull_downsample_over_rmdims(model, prec, other_op, down_node, down_op);
-        } else if let Some(other_op) = prec.op_as::<ops::array::AddDims>() {
-            return array::pull_downsample_over_adddims(model, prec, other_op, down_node, down_op);
-        } else if let Some(conv_op) = prec.op_as::<ops::cnn::conv::ConvUnary>() {
-            return conv::fuse_downsample_into_conv(model, prec, conv_op, down_node, down_op);
-        } else if let Some(other_op) = prec.op_as::<ops::scan::Typed>() {
-            return scan::pull_downsample_over_scan(model, prec, other_op, down_node, down_op);
         }
     }
     Ok(None)

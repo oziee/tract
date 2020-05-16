@@ -1,7 +1,7 @@
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use tract_core::internal::*;
-use tract_core::ops::array::Squeeze;
+use tract_hir::internal::*;
+use tract_hir::ops::array::Squeeze;
 
 pub fn squeeze(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     let squeeze_dims = pb.get_attr_opt_list_int("squeeze_dims")?;
@@ -18,7 +18,7 @@ pub fn squeeze(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn Infer
 mod tests {
     #![allow(non_snake_case)]
     use super::*;
-    use tract_core::ndarray::*;
+    use tract_ndarray::Array;
 
     fn run<I>(op: Squeeze, input: I) -> Tensor
     where
@@ -47,7 +47,7 @@ mod tests {
     fn squeeze_inference_1() {
         let input = InferenceFact::default()
             .with_datum_type(DatumType::TDim)
-            .with_shape(shapefact![1, 1, (TDim::stream() - 2), 16]);
+            .with_shape(shapefactoid![1, 1, (TDim::stream() - 2), 16]);
         let any = InferenceFact::default();
 
         let mut op = Squeeze::new(Some(vec![1]));
@@ -55,7 +55,7 @@ mod tests {
 
         let expect: TVec<_> = tvec!(InferenceFact::default()
             .with_datum_type(DatumType::TDim)
-            .with_shape(shapefact![1, (TDim::stream() - 2), 16]));
+            .with_shape(shapefactoid![1, (TDim::stream() - 2), 16]));
 
         assert_eq!(inferred.1, expect);
     }

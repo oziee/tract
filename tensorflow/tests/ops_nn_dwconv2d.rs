@@ -5,17 +5,15 @@ extern crate env_logger;
 extern crate log;
 #[macro_use]
 extern crate proptest;
-extern crate tract_core;
 extern crate tract_tensorflow;
 
 mod utils;
 
 use crate::utils::*;
-use ndarray::prelude::*;
 use proptest::prelude::*;
-use tract_core::ndarray;
-use tract_core::prelude::*;
+use tract_ndarray::prelude::*;
 use tract_tensorflow::conform::*;
+use tract_tensorflow::prelude::*;
 use tract_tensorflow::tfpb;
 use tract_tensorflow::tfpb::tensorflow::DataType::DtFloat;
 
@@ -58,10 +56,10 @@ fn img_and_ker() -> BoxedStrategy<(Array4<f32>, Array4<f32>, usize)> {
         })
         .prop_map(|(img_shape, ker_shape, img, ker, stride)| {
             (
-                Array::from_vec(img.into_iter().map(|i| i as f32).collect())
+                Array::from(img.into_iter().map(|i| i as f32).collect::<Vec<_>>())
                     .into_shape(img_shape)
                     .unwrap(),
-                Array::from_vec(ker.into_iter().map(|i| i as f32).collect())
+                Array::from(ker.into_iter().map(|i| i as f32).collect::<Vec<_>>())
                     .into_shape(ker_shape)
                     .unwrap(),
                 stride,

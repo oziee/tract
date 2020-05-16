@@ -1,5 +1,7 @@
+use crate::hash::{DynHash, SloppyHash};
 use std::fmt;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::ops::{Add, Deref, Mul, Neg};
 
 use num_traits::{AsPrimitive, Bounded, Zero};
@@ -8,12 +10,12 @@ use super::MatMatMul;
 use super::*;
 
 pub trait QMatMatMul<TA, TB, TC, TI>:
-    fmt::Debug + fmt::Display + objekt::Clone + Send + Sync
+    Debug + fmt::Display + dyn_clone::DynClone + Send + Sync + DynHash
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
+    TA: Copy + Zero + 'static,
+    TB: Copy + Zero + 'static,
+    TC: Copy + Debug + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + 'static,
 {
     fn as_mmm(&self) -> &dyn MatMatMul<TA, TB, TC, TI>;
     fn as_mmm_mut(&mut self) -> &mut dyn MatMatMul<TA, TB, TC, TI>;
@@ -29,27 +31,51 @@ where
     unsafe fn run(&self, a: *const TA, b: *const TB, c: *mut TC, non_linear: &[FusedSpec<TI>]);
 }
 
-clone_trait_object!(<TA, TB, TC, TI> QMatMatMul<TA, TB, TC, TI> where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
+dyn_clone::clone_trait_object!(<TA, TB, TC, TI> QMatMatMul<TA, TB, TC, TI> where
+    TA: Copy + Zero + 'static,
+    TB: Copy + Zero + 'static,
+    TC: Copy + Debug + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
 );
 
+impl<TA, TB, TC, TI> Hash for Box<dyn QMatMatMul<TA, TB, TC, TI>>
+where
+    TA: Copy + Zero + 'static,
+    TB: Copy + Zero + 'static,
+    TC: Copy + Debug + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + 'static,
+{
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dyn_hash(state)
+    }
+}
+
 #[derive(Debug, Clone)]
-pub enum QuantizedParam<TI> {
-    Scalar(TI),
-    Vector(Vec<TI>),
+pub enum QuantizedParam<T: crate::hash::SloppyHash> {
+    Scalar(T),
+    Vector(Vec<T>),
+}
+
+impl<T: crate::hash::SloppyHash> std::hash::Hash for QuantizedParam<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Scalar(t) => t.sloppy_hash(state),
+            Self::Vector(t) => {
+                t.len().hash(state);
+                t.iter().for_each(|v| v.sloppy_hash(state))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + SloppyHash + Mul + Zero + Debug + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
 {
     pub mmm: MatMatMulImpl<K, TA, TB, TC, TI>,
     pub zero_point_a: Option<QuantizedParam<TA>>,
@@ -61,11 +87,11 @@ where
 
 impl<K, TA, TB, TC, TI> QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero + AsPrimitive<TI>,
-    TB: Copy + Zero + AsPrimitive<TI> + fmt::Debug,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug + 'static,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + SloppyHash + AsPrimitive<TI>,
+    TB: Copy + Zero + SloppyHash + AsPrimitive<TI> + Debug + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
 {
     fn sum_a_over_k(&self, mut a: *const TA) -> Vec<TI> {
         match &self.mmm.a_storage {
@@ -126,12 +152,13 @@ where
             },
             MatrixStoreSpec::OffsetsAndPtrs { row_byte_offsets, col_byte_offsets, .. } => unsafe {
                 for n in 0..self.n {
-                    for k  in 0..self.k {
-                        let offset = (row_byte_offsets[k] + col_byte_offsets[n]) / std::mem::size_of::<TB>() as isize;
+                    for k in 0..self.k {
+                        let offset = (row_byte_offsets[k] + col_byte_offsets[n])
+                            / std::mem::size_of::<TB>() as isize;
                         result[n] = result[n] + (*b.offset(offset)).as_();
                     }
                 }
-            }
+            },
             b => panic!("Storage {:?} for B not supported for quantized ops", b),
         }
         result
@@ -140,11 +167,11 @@ where
 
 impl<K, TA, TB, TC, TI> From<MatMatMulImpl<K, TA, TB, TC, TI>> for QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
 {
     fn from(mmm: MatMatMulImpl<K, TA, TB, TC, TI>) -> QMatMatMulImpl<K, TA, TB, TC, TI> {
         QMatMatMulImpl {
@@ -159,11 +186,11 @@ where
 
 impl<K, TA, TB, TC, TI> Deref for QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
 {
     type Target = MatMatMulImpl<K, TA, TB, TC, TI>;
     fn deref(&self) -> &Self::Target {
@@ -173,31 +200,31 @@ where
 
 unsafe impl<K, TA, TB, TC, TI> Send for QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
 {
 }
 
 unsafe impl<K, TA, TB, TC, TI> Sync for QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
 {
 }
 
 impl<K, TA, TB, TC, TI> QMatMatMul<TA, TB, TC, TI> for QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero + fmt::Debug + AsPrimitive<TI>,
-    TB: Copy + Zero + fmt::Debug + AsPrimitive<TI>,
-    TC: Copy + fmt::Debug + Bounded + AsPrimitive<TI>,
-    TI: Copy + Add + Mul<Output = TI> + Zero + Neg<Output = TI> + fmt::Debug + 'static,
-    K: MatMatMulKer<TA, TB, TC, TI>,
+    TA: Copy + Zero + Debug + SloppyHash + AsPrimitive<TI> + 'static,
+    TB: Copy + Zero + Debug + SloppyHash + AsPrimitive<TI> + 'static,
+    TC: Copy + Debug + Bounded + AsPrimitive<TI> + SloppyHash + 'static,
+    TI: Copy + Add + Mul<Output = TI> + Zero + Neg<Output = TI> + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI> + 'static,
     usize: AsPrimitive<TI>,
     i32: AsPrimitive<TI>,
 {
@@ -316,18 +343,54 @@ where
 
 impl<K, TA, TB, TC, TI> fmt::Display for QMatMatMulImpl<K, TA, TB, TC, TI>
 where
-    TA: Copy + Zero,
-    TB: Copy + Zero,
-    TC: Copy + Debug,
-    TI: Copy + Add + Mul + Zero + fmt::Debug,
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
     K: MatMatMulKer<TA, TB, TC, TI>,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            fmt,
-            "A:{}, B:{} C:{} (m:{}, k:{}, n:{})",
-            self.a_storage, self.b_storage, self.c_storage, self.m, self.k, self.n
-        )
+        write!(fmt, "{}", self.mmm)
+    }
+}
+
+impl<TA, TB, TC, TI, K> std::hash::Hash for QMatMatMulImpl<K, TA, TB, TC, TI>
+where
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI>,
+{
+    fn hash<S: std::hash::Hasher>(&self, state: &mut S) {
+        /*
+        pub mmm: MatMatMulImpl<K, TA, TB, TC, TI>,
+        pub zero_point_a: Option<QuantizedParam<TA>>,
+        pub zero_point_b: Option<QuantizedParam<TB>>,
+
+        pub zero_point_c: Option<TC>,
+        pub scale_factor: Option<(TI, usize)>,
+        */
+        self.mmm.hash(state);
+        if let Some(a) = &self.zero_point_a {
+            a.hash(state);
+        }
+        if let Some(b) = &self.zero_point_b {
+            b.hash(state);
+        }
+    }
+}
+
+impl<TA, TB, TC, TI, K> crate::hash::DynHash for QMatMatMulImpl<K, TA, TB, TC, TI>
+where
+    TA: Copy + Zero + SloppyHash + 'static,
+    TB: Copy + Zero + SloppyHash + 'static,
+    TC: Copy + Debug + SloppyHash + 'static,
+    TI: Copy + Add + Mul + Zero + Debug + SloppyHash + 'static,
+    K: MatMatMulKer<TA, TB, TC, TI>,
+{
+    fn dyn_hash(&self, hasher: &mut dyn std::hash::Hasher) {
+        crate::hash::dyn_hash(self, hasher)
     }
 }
 
@@ -339,32 +402,41 @@ pub mod test {
     use crate::align::Buffer;
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use std::marker::PhantomData;
+    use std::ops::{AddAssign, Sub};
 
     #[derive(Debug)]
-    pub struct QMatMulProblem<T> {
+    pub struct QMatMulProblem<TA: SloppyHash, TB: SloppyHash, TC, TI: SloppyHash> {
         pub m: usize,
         pub k: usize,
         pub n: usize,
-        pub a: Vec<T>,
-        pub a0: QuantizedParam<T>,
-        pub b: Vec<T>,
-        pub b0: QuantizedParam<T>,
+        pub a: Vec<TA>,
+        pub a0: QuantizedParam<TA>,
+        pub b: Vec<TB>,
+        pub b0: QuantizedParam<TB>,
+        pub boo: PhantomData<(TC, TI)>,
     }
 
-    impl<T: Arbitrary + 'static> Arbitrary for QuantizedParam<T> {
+    impl<TI: Arbitrary + 'static + SloppyHash> Arbitrary for QuantizedParam<TI> {
         type Parameters = usize;
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(n: usize) -> Self::Strategy {
             prop_oneof![
-                any::<T>().prop_map(QuantizedParam::Scalar),
-                vec(any::<T>(), n..=n).prop_map(QuantizedParam::Vector),
+                any::<TI>().prop_map(QuantizedParam::Scalar),
+                vec(any::<TI>(), n..=n).prop_map(QuantizedParam::Vector),
             ]
             .boxed()
         }
     }
 
-    impl<T: Arbitrary + 'static> Arbitrary for QMatMulProblem<T> {
+    impl<TA, TB, TC, TI> Arbitrary for QMatMulProblem<TA, TB, TC, TI>
+    where
+        TA: Arbitrary + 'static + Debug + 'static + SloppyHash,
+        TB: Arbitrary + 'static + Debug + 'static + SloppyHash,
+        TC: Arbitrary + 'static + Debug + 'static,
+        TI: Arbitrary + 'static + Debug + 'static + SloppyHash,
+    {
         type Parameters = ();
         type Strategy = BoxedStrategy<Self>;
 
@@ -375,25 +447,54 @@ pub mod test {
                         Just(m),
                         Just(k),
                         Just(n),
-                        vec(any::<T>(), m * k..=m * k),
-                        any_with::<QuantizedParam<T>>(m),
-                        vec(any::<T>(), k * n..=k * n),
-                        any_with::<QuantizedParam<T>>(n),
+                        vec(any::<TA>(), m * k..=m * k),
+                        any_with::<QuantizedParam<TA>>(m),
+                        vec(any::<TB>(), k * n..=k * n),
+                        any_with::<QuantizedParam<TB>>(n),
                     )
                 })
-                .prop_map(|(m, k, n, a, a0, b, b0)| QMatMulProblem { m, k, n, a, a0, b, b0 })
+                .prop_map(|(m, k, n, a, a0, b, b0)| QMatMulProblem {
+                    m,
+                    k,
+                    n,
+                    a,
+                    a0,
+                    b,
+                    b0,
+                    boo: PhantomData,
+                })
                 .boxed()
         }
     }
 
-    impl<T: AsPrimitive<i32> + Zero + Copy + Debug> QMatMulProblem<T> {
-        pub fn ref_i32(&self) -> Vec<i32> {
-            let mut c = vec![0; self.m * self.n];
+    impl<TA, TB, TC, TI> QMatMulProblem<TA, TB, TC, TI>
+    where
+        TA: Arbitrary + SloppyHash + 'static + Debug + AsPrimitive<TI> + Zero + Copy,
+        TB: Arbitrary + SloppyHash + 'static + Debug + AsPrimitive<TI> + Zero + Copy,
+        TC: Arbitrary + SloppyHash + 'static + Debug + Copy + Bounded + AsPrimitive<TI> + Zero + 'static,
+        TI: Arbitrary
+            + 'static
+            + Debug
+            + Copy
+            + AsPrimitive<TC>
+            + Add<Output = TI>
+            + Mul<Output = TI>
+            + Sub<Output = TI>
+            + AddAssign
+            + Neg<Output = TI>
+            + Zero
+            + SloppyHash
+            + Ord,
+        usize: AsPrimitive<TI>,
+        i32: AsPrimitive<TI>,
+    {
+        pub fn reference(&self) -> Vec<TC> {
+            let mut i = vec![TI::zero(); self.m * self.n];
             for m in 0..self.m {
                 for n in 0..self.n {
                     for k in 0..self.k {
-                        let a = self.a[k + self.k * m].as_();
-                        let b = self.b[n + self.n * k].as_();
+                        let a: TI = self.a[k + self.k * m].as_();
+                        let b: TI = self.b[n + self.n * k].as_();
                         let a0 = match &self.a0 {
                             QuantizedParam::Scalar(a0) => a0.as_(),
                             QuantizedParam::Vector(a0) => a0[m].as_(),
@@ -402,17 +503,19 @@ pub mod test {
                             QuantizedParam::Scalar(b0) => b0.as_(),
                             QuantizedParam::Vector(b0) => b0[n].as_(),
                         };
-                        c[n + self.n * m] += (a - a0) * (b - b0);
+                        i[n + self.n * m] += (a - a0) * (b - b0);
                     }
                 }
             }
-            c
+            i.iter()
+                .map(|i| i.max(&TC::min_value().as_()).min(&TC::max_value().as_()).as_())
+                .collect()
         }
 
-        pub fn run_i32<K: MatMatMulKer<T, T, i32, i32>>(&self) -> Vec<i32> {
+        pub fn run<K: MatMatMulKer<TA, TB, TC, TI>>(&self) -> Vec<TC> {
             unsafe {
-                let mut c = vec![0i32; self.m * self.n];
-                let mut mmm = QMatMatMulImpl::from(MatMatMulImpl::<K, T, T, i32, i32>::new(
+                let mut c = vec![TC::zero(); self.m * self.n];
+                let mut mmm = QMatMatMulImpl::from(MatMatMulImpl::<K, TA, TB, TC, TI>::new(
                     self.m, self.k, self.n,
                 ));
                 let mut packed_a =
@@ -437,24 +540,25 @@ pub mod test {
 
     #[macro_export]
     macro_rules! qmmm_frame_tests {
-        ($cond:expr, $ker:ty, $t: ty) => {
+        ($cond:expr, $ker:ty, $ta: ty, $tb: ty, $tc: ty, $ti: ty) => {
             mod qframe {
                 use proptest::prelude::*;
+                use std::marker::PhantomData;
                 #[allow(unused_imports)]
                 use $crate::frame::mmm::qmmm::test::*;
                 use $crate::frame::mmm::qmmm::QuantizedParam;
 
                 proptest::proptest! {
                     #[test]
-                    fn q_mat_mul_i32_prop(pb in any::<QMatMulProblem<$t>>()) {
+                    fn q_mat_mul_prop(pb in any::<QMatMulProblem<$ta, $tb, $tc, $ti>>()) {
                         if $cond {
-                            prop_assert_eq!(pb.run_i32::<$ker>(), pb.ref_i32())
+                            prop_assert_eq!(pb.run::<$ker>(), pb.reference())
                         }
                     }
                 }
 
                 #[test]
-                fn q_mat_mul_i8_i32_1() {
+                fn q_mat_mul_1() {
                     if $cond {
                         let pb = QMatMulProblem {
                             m: 1,
@@ -464,13 +568,48 @@ pub mod test {
                             a: vec![0],
                             b0: QuantizedParam::Vector(vec![1]),
                             b: vec![0],
+                            boo: PhantomData,
                         };
-                        assert_eq!(pb.run_i32::<$ker>(), pb.ref_i32());
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
                     }
                 }
 
                 #[test]
-                fn q_mat_mul_i8_i32_n2() {
+                fn q_mat_mul_sat_1() {
+                    if $cond {
+                        let pb = QMatMulProblem {
+                            m: 1,
+                            k: 1,
+                            n: 1,
+                            a0: QuantizedParam::Vector(vec![0]),
+                            a: vec![3],
+                            b0: QuantizedParam::Vector(vec![43]),
+                            b: vec![0],
+                            boo: PhantomData,
+                        };
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
+                    }
+                }
+                #[test]
+
+                fn q_mat_mul_sat_2() {
+                    if $cond {
+                        let pb = QMatMulProblem {
+                            m: 1,
+                            k: 1,
+                            n: 1,
+                            a0: QuantizedParam::Vector(vec![0]),
+                            a: vec![<$ta>::min_value()],
+                            b0: QuantizedParam::Vector(vec![0]),
+                            b: vec![1],
+                            boo: PhantomData,
+                        };
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
+                    }
+                }
+
+                #[test]
+                fn q_mat_mul_n2() {
                     if $cond {
                         let pb = QMatMulProblem {
                             m: 1,
@@ -480,13 +619,14 @@ pub mod test {
                             a0: QuantizedParam::Vector(vec![1]),
                             b: vec![0, 0],
                             b0: QuantizedParam::Vector(vec![0, 1]),
+                            boo: PhantomData,
                         };
-                        assert_eq!(pb.run_i32::<$ker>(), pb.ref_i32());
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
                     }
                 }
 
                 #[test]
-                fn q_mat_mul_i8_i32_k2() {
+                fn q_mat_mul_k2() {
                     if $cond {
                         let pb = QMatMulProblem {
                             m: 1,
@@ -496,8 +636,55 @@ pub mod test {
                             a0: QuantizedParam::Vector(vec![0]),
                             b: vec![0, 1],
                             b0: QuantizedParam::Vector(vec![0]),
+                            boo: PhantomData,
                         };
-                        assert_eq!(pb.run_i32::<$ker>(), pb.ref_i32());
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
+                    }
+                }
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! qmmm_s_frame_tests {
+        ($cond:expr, $ker:ty, $ta: ty, $tb: ty, $tc: ty, $ti: ty) => {
+            mod qframe_s {
+                use std::marker::PhantomData;
+                #[allow(unused_imports)]
+                use $crate::frame::mmm::qmmm::test::*;
+                use $crate::frame::mmm::qmmm::QuantizedParam;
+
+                #[test]
+                fn q_mat_mul_1_1_5() {
+                    if $cond {
+                        let pb = QMatMulProblem {
+                            m: 1,
+                            k: 1,
+                            n: 5,
+                            a: vec![-1],
+                            a0: QuantizedParam::Scalar(0),
+                            b: vec![0, 0, 0, 0, -2],
+                            b0: QuantizedParam::Scalar(0),
+                            boo: PhantomData,
+                        };
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
+                    }
+                }
+
+                #[test]
+                fn q_mat_mul_1_1_1() {
+                    if $cond {
+                        let pb = QMatMulProblem {
+                            m: 1,
+                            k: 1,
+                            n: 1,
+                            a: vec![11],
+                            a0: QuantizedParam::Scalar(10),
+                            b: vec![-1],
+                            b0: QuantizedParam::Scalar(0),
+                            boo: PhantomData,
+                        };
+                        assert_eq!(pb.run::<$ker>(), pb.reference());
                     }
                 }
             }

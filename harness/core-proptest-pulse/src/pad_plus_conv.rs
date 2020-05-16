@@ -1,11 +1,9 @@
 use proptest::proptest;
 use proptest::test_runner::TestCaseResult;
 use proptest::*;
-use tract_core::dimfact;
-use tract_core::internal::*;
-use tract_core::ndarray::*;
-use tract_core::ops::array::PadMode;
-use tract_core::shapefact;
+use tract_hir::internal::*;
+use tract_hir::ops::array::{Pad, PadMode};
+use tract_ndarray::*;
 
 use super::*;
 
@@ -65,11 +63,10 @@ impl Arbitrary for PadPlusConvProblem {
 
 impl PadPlusConvProblem {
     pub fn run(&self) -> TestCaseResult {
-        use tract_core::ops::array::Pad;
-        use tract_core::ops::cnn::*;
+        use tract_hir::ops::cnn::*;
         let mut model = InferenceModel::default();
         let mut wire = model
-            .add_source("a", InferenceFact::dt_shape(f32::datum_type(), shapefact!(1, 1, S)))
+            .add_source("a", InferenceFact::dt_shape(f32::datum_type(), shapefactoid!(1, 1, S)))
             .unwrap();
         if self.pad_before > 0 || self.pad_after > 0 {
             wire = model
@@ -241,3 +238,21 @@ fn conv_kaldi_librispeech() {
     .run()
     .unwrap()
 }
+
+#[test]
+fn conv_9() {
+    PadPlusConvProblem {
+        pad_before: 13,
+        pad_after: 9,
+        pad_mode: PadMode::Constant(rctensor0(9999f32)),
+        stride: 2,
+        dilation: 2,
+        pulse: 2,
+        ker: arr3(&[[[0.0f32, 0.0]]]),
+        input: arr3(&[[[0.0f32, 0.0, 0.0, 0.0]]]),
+    }
+    .run()
+    .unwrap()
+}
+
+

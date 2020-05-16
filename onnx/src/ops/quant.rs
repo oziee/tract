@@ -1,7 +1,7 @@
 use crate::model::{OnnxOpRegister, ParsingContext};
 use crate::pb::NodeProto;
-use tract_core::internal::*;
-use tract_core::ops::quant::*;
+use tract_hir::internal::*;
+use tract_hir::ops::quant::*;
 
 pub fn register_all_ops(reg: &mut OnnxOpRegister) {
     reg.insert("QuantizeLinear", quantize_linear);
@@ -24,10 +24,12 @@ fn dequantize_linear(
     Ok((Box::new(op), vec![]))
 }
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct QuantizeLinear {
     optional_zero_point_input: Option<usize>,
 }
+
+tract_linalg::impl_dyn_hash!(QuantizeLinear);
 
 impl Op for QuantizeLinear {
     fn name(&self) -> Cow<str> {
@@ -92,6 +94,7 @@ impl InferenceRulesOp for QuantizeLinear {
         target: &mut TypedModel,
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
+        use tract_hir::ops::quant::*;
         let scale = target
             .outlet_fact(mapping[&node.inputs[1]])?
             .konst
@@ -117,14 +120,15 @@ impl InferenceRulesOp for QuantizeLinear {
         target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]]])
     }
 
-    inference_op_as_op!();
+    as_op!();
 }
 
-
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct DequantizeLinear {
     optional_zero_point_input: Option<usize>,
 }
+
+tract_linalg::impl_dyn_hash!(DequantizeLinear);
 
 impl Op for DequantizeLinear {
     fn name(&self) -> Cow<str> {
@@ -206,5 +210,5 @@ impl InferenceRulesOp for DequantizeLinear {
         target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]]])
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

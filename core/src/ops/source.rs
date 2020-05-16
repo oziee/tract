@@ -1,7 +1,7 @@
 use crate::internal::*;
 
 #[derive(Debug, Clone, new)]
-pub struct SourceState(usize);
+pub struct SourceState(pub usize);
 
 impl OpState for SourceState {
     fn eval(
@@ -14,63 +14,13 @@ impl OpState for SourceState {
     }
 }
 
-#[derive(Debug, Clone, new)]
-pub struct Source;
-
-impl Op for Source {
-    fn name(&self) -> Cow<str> {
-        "Source".into()
-    }
-
-    not_a_typed_op!();
-    not_a_pulsed_op!();
-}
-
-impl StatefullOp for Source {
-    fn state(
-        &self,
-        _session: &mut SessionState,
-        node_id: usize,
-    ) -> TractResult<Option<Box<dyn OpState>>> {
-        Ok(Some(Box::new(SourceState(node_id))))
-    }
-}
-
-impl InferenceRulesOp for Source {
-    /// Registers the inference rules of the operator.
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        _s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 0)?;
-        check_output_arity(&outputs, 1)?;
-        Ok(())
-    }
-
-    inference_op_as_op!();
-
-    fn to_typed(
-        &self,
-        _source: &InferenceModel,
-        node: &InferenceNode,
-        target: &mut TypedModel,
-        _mapping: &HashMap<OutletId, OutletId>,
-    ) -> TractResult<TVec<OutletId>> {
-        use std::convert::TryInto;
-        if let Ok(fact) = node.outputs[0].fact.clone().try_into() {
-            target.wire_node(&*node.name, Box::new(TypedSource::new(fact)) as Box<dyn TypedOp>, &[])
-        } else {
-            bail!("Output type not determined")
-        }
-    }
-}
-
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct TypedSource {
     fact: TypedFact,
 }
+
+
+tract_linalg::impl_dyn_hash!(TypedSource);
 
 impl Op for TypedSource {
     fn name(&self) -> Cow<str> {
@@ -96,6 +46,23 @@ impl TypedOp for TypedSource {
         Ok(tvec!(self.fact.clone()))
     }
 
+    fn change_axes(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+        _io: InOut,
+        change: &AxisOp,
+    ) -> TractResult<Option<AxisChangeConsequence>> {
+        let mut fact = self.fact.clone();
+        change.change_shape(&mut fact.shape)?;
+        Ok(Some(AxisChangeConsequence::new(
+            model,
+            node,
+            Some(Box::new(TypedSource::new(fact))),
+            change,
+        )))
+    }
+
     fn pulsify(
         &self,
         _source: &NormalizedModel,
@@ -110,13 +77,15 @@ impl TypedOp for TypedSource {
         Ok(tvec!(id))
     }
 
-    typed_op_as_op!();
+    as_op!();
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct PulsedSource {
     fact: PulsedFact,
 }
+
+tract_linalg::impl_dyn_hash!(PulsedSource);
 
 impl Op for PulsedSource {
     fn name(&self) -> Cow<str> {
@@ -148,5 +117,5 @@ impl PulsedOp for PulsedSource {
         ))
     }
 
-    pulsed_op_as_op!();
+    as_op!();
 }

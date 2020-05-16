@@ -1,5 +1,4 @@
-use tract_core::internal::*;
-use tract_core::ndarray;
+use tract_hir::internal::*;
 
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
@@ -14,17 +13,19 @@ pub fn pack(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn Inferenc
 
 //TODO: incorporate as Concat
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct Pack {
     t: DatumType,
     n: usize, // The number of inputs
     axis: usize,
 }
 
+tract_linalg::impl_dyn_hash!(Pack);
+
 impl Pack {
     /// Evaluates the operation given the input tensors.
     fn eval_t<T: Datum>(&self, inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
-        use tract_core::ndarray::Axis;
+        use tract_ndarray::Axis;
         let arrays =
             inputs.iter().map(|m| Ok(m.cast_to::<T>()?)).collect::<TractResult<Vec<_>>>()?;
         let views: Vec<_> = arrays
@@ -33,7 +34,7 @@ impl Pack {
             .collect();
         let mut shape = views[0].shape().to_vec();
         shape[self.axis] = views.iter().map(|v| v.shape()[self.axis]).sum();
-        let mut array = ndarray::Array::<T, _>::default(&*shape);
+        let mut array = tract_ndarray::Array::<T, _>::default(&*shape);
         let mut offset = 0;
         for v in views {
             let len = v.shape()[self.axis];
@@ -104,7 +105,7 @@ impl InferenceRulesOp for Pack {
         s.equals(&outputs[0].shape[axis], self.n.to_dim())
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -113,21 +114,32 @@ impl InferenceRulesOp for Pack {
         target: &mut TypedModel,
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
+        let dt = node.inputs.iter().map(|i| Ok(target.outlet_fact(mapping[i])?.datum_type)).collect::<TractResult<TVec<DatumType>>>()?;
+        let dt = DatumType::super_type_for(dt.iter()).ok_or("No supertype")?;
         let inputs: TVec<OutletId> = node
             .inputs
             .iter()
             .enumerate()
             .map(|(ix, &o)| {
+                let wire = mapping[&o];
+                let wire = target.wire_node(
+                    format!("{}-cast-{}", node.name, ix),
+                    tract_hir::ops::cast(dt),
+                    &[wire]
+                )?[0];
                 Ok(target.wire_node(
                     format!("{}-add_dims-{}", node.name, ix),
-                    tract_core::ops::array::AddDims::new(vec![self.axis]),
-                    [mapping[&o]].as_ref(),
+                    AxisOp::Add(self.axis),
+                    [wire].as_ref(),
                 )?[0])
             })
             .collect::<TractResult<TVec<OutletId>>>()?;
         target.wire_node(
             &*node.name,
-            tract_core::ops::array::Concat::new(self.axis as i64),
+            tract_hir::ops::array::TypedConcat::new(
+                self.axis as usize,
+                tvec!(tract_hir::ops::array::ConcatSlice::Var; node.inputs.len()),
+            ),
             &*inputs,
         )
     }
@@ -137,7 +149,7 @@ impl InferenceRulesOp for Pack {
 mod tests {
     #![allow(non_snake_case)]
     use super::*;
-    use num_traits::Zero;
+    use tract_num_traits::Zero;
 
     #[test]
     fn pack_0() {

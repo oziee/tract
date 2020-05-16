@@ -1,15 +1,16 @@
-use tract_core::internal::*;
-use tract_core::ndarray::*;
-use tract_core::ops::cnn::{ConvUnary, PoolSpec};
+use tract_hir::internal::*;
+use tract_ndarray::prelude::*;
 
-#[derive(Debug, Copy, Clone)]
+use tract_hir::ops::cnn::{ConvUnary, PoolSpec};
+
+#[derive(Debug, Copy, Clone, Hash)]
 pub enum PaddingStrat {
     FlexFixed(usize),
     FixedFlex(usize),
     FixedFixed(usize, usize),
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct SpaceToBatchUnary {
     pub datum_type: DatumType,
     pub space_shape: TVec<TDim>,
@@ -17,6 +18,8 @@ pub struct SpaceToBatchUnary {
     pub block_shape: Array1<i32>,
     pub pad: TVec<PaddingStrat>,
 }
+
+tract_linalg::impl_dyn_hash!(SpaceToBatchUnary);
 
 impl Op for SpaceToBatchUnary {
     fn name(&self) -> Cow<str> {
@@ -79,12 +82,12 @@ impl TypedOp for SpaceToBatchUnary {
                         kernel: conv_op.kernel.clone(),
                         group: conv_op.group,
                         bias: None,
-                        q_params: None
+                        q_params: None,
                     };
                     let mut patch = TypedModelPatch::default();
                     let tap = patch.tap_model(&model, node.inputs[0])?;
                     let out = patch.model.wire_node(&*conv_node.name, op, &[tap])?[0];
-                    patch.shunt_outside(OutletId::new(b2s_node.id, 0), out)?;
+                    patch.shunt_outside(model, OutletId::new(b2s_node.id, 0), out)?;
                     return Ok(Some(patch));
                 }
             }
@@ -92,10 +95,10 @@ impl TypedOp for SpaceToBatchUnary {
         Ok(None)
     }
 
-    typed_op_as_op!();
+    as_op!();
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct BatchToSpaceUnary {
     datum_type: DatumType,
     batch_shape: TVec<TDim>,
@@ -103,6 +106,8 @@ pub struct BatchToSpaceUnary {
     block_shape: Array1<i32>,
     pad: Vec<PaddingStrat>,
 }
+
+tract_linalg::impl_dyn_hash!(BatchToSpaceUnary);
 
 impl Op for BatchToSpaceUnary {
     fn name(&self) -> Cow<str> {
@@ -138,7 +143,7 @@ impl StatelessOp for BatchToSpaceUnary {
 }
 
 impl TypedOp for BatchToSpaceUnary {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         Ok(tvec!(TypedFact::dt_shape(inputs[0].datum_type, &*self.space_shape)?))

@@ -1,5 +1,4 @@
-use tract_core::internal::*;
-use tract_core::ndarray;
+use tract_hir::internal::*;
 
 use crate::model::NodeLine;
 use crate::model::ParsingContext;
@@ -19,7 +18,8 @@ pub fn affine_component(ctx: &ParsingContext, name: &str) -> TractResult<Box<dyn
     // O•TI -> t -> TI•O -> T•I•O = HWIO
     let o_ti = kernel.to_array_view::<f32>()?;
     let t_i_o_shape = (kernel_len, kernel.len() / kernel_len / bias.len(), bias.len());
-    let t_i_o = ndarray::Array::from_shape_vec(t_i_o_shape, o_ti.t().iter().cloned().collect())?;
+    let t_i_o =
+        tract_ndarray::Array::from_shape_vec(t_i_o_shape, o_ti.t().iter().cloned().collect())?;
     Ok(Box::new(Affine {
         kernel_len,
         dilation,
@@ -28,7 +28,7 @@ pub fn affine_component(ctx: &ParsingContext, name: &str) -> TractResult<Box<dyn
     }))
 }
 
-#[derive(Clone, Debug, new)]
+#[derive(Clone, Debug, new, Hash)]
 struct Affine {
     kernel_len: usize,
     dilation: usize,
@@ -36,36 +36,17 @@ struct Affine {
     bias_params: Arc<Tensor>,
 }
 
-impl Affine {
-    fn as_conv(&self) -> tract_core::ops::cnn::Conv {
-        use tract_core::ops::cnn::*;
-        use tract_core::ops::nn::*;
-        let conv = Conv::default()
-            .nhwc()
-            .hwio()
-            .dilations(tvec!(self.dilation))
-            .kernel_shape(tvec!(self.kernel_len));
-        trace!("{:?} -> {:?}", self, conv);
-        conv
-    }
+tract_linalg::impl_dyn_hash!(Affine);
 
-    fn eval_t<T: Datum + num_traits::One + ndarray::LinalgScalar>(
-        &self,
-        input: Tensor,
-    ) -> TractResult<Tensor> {
-        let array = input.into_array::<T>()?;
-        let array = array.insert_axis(ndarray::Axis(0));
-        let res = self
-            .as_conv()
-            .eval(tvec!(
-                array.into_arc_tensor(),
-                Arc::clone(&self.linear_params),
-                Arc::clone(&self.bias_params)
-            ))?
-            .remove(0);
-        let res = res.into_tensor().into_array::<T>()?;
-        let res = res.index_axis_move(ndarray::Axis(0), 0);
-        Ok(res.into_tensor())
+impl Affine {
+    fn as_conv(&self) -> tract_hir::ops::cnn::Conv {
+        use tract_hir::ops::cnn::*;
+        Conv::default()
+            .hwc()
+            .hwio()
+            .bias_input(2)
+            .dilations(tvec!(self.dilation))
+            .kernel_shape(tvec!(self.kernel_len))
     }
 }
 
@@ -79,10 +60,9 @@ impl Op for Affine {
 
 impl StatelessOp for Affine {
     fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
-        let input = args_1!(inputs);
-        let output =
-            dispatch_numbers!(Self::eval_t(input.datum_type())(self, input.into_tensor()))?;
-        Ok(tvec!(output.into_arc_tensor()))
+        inputs.push(Arc::clone(&self.linear_params));
+        inputs.push(Arc::clone(&self.bias_params));
+        self.as_conv().eval(inputs)
     }
 }
 
@@ -102,43 +82,31 @@ impl InferenceRulesOp for Affine {
         s.equals(&outputs[0].shape[1], &self.linear_params.shape()[2].to_dim())?;
         s.equals(&inputs[0].shape[1], &self.linear_params.shape()[1].to_dim())?;
         s.given(&inputs[0].shape, move |s, ishape| {
-            let mut ishape = ishape.to_vec();
-            ishape.insert(0, 1.to_dim());
-            let oshape = self.as_conv().output_shape(&*ishape, self.linear_params.shape());
-            s.equals(&outputs[0].shape[0], &oshape[1])
+            let oshape = self.as_conv().output_shape(&*ishape, self.linear_params.shape())?;
+            s.equals(&outputs[0].shape[0], &oshape[0])
         })?;
         Ok(())
     }
 
-    inference_op_as_op!();
-
-    fn to_typed(
+    fn incorporate(
         &self,
-        _source: &InferenceModel,
+        model: &InferenceModel,
         node: &InferenceNode,
-        target: &mut TypedModel,
-        mapping: &HashMap<OutletId, OutletId>,
-    ) -> TractResult<TVec<OutletId>> {
-        let input = mapping[&node.inputs[0]];
+    ) -> TractResult<Option<InferenceModelPatch>> {
+        let mut patch = InferenceModelPatch::default();
 
-        let add_dim = target.wire_node(
-            format!("{}-AddBatchDim", node.name),
-            tract_core::ops::array::AddDims::new(vec![0]),
-            [input].as_ref(),
-        )?;
+        let input = patch.tap_model(model, node.inputs[0])?;
+        let lin = patch.add_const(format!("{}-Linear", node.name), self.linear_params.clone())?;
+        let bias = patch.add_const(format!("{}-Bias", node.name), self.bias_params.clone())?;
 
-        let lin = target.add_const(format!("{}-Linear", node.name), self.linear_params.clone())?;
-        let bias = target.add_const(format!("{}-Bias", node.name), self.bias_params.clone())?;
-
-        let conv = target.wire_node(
+        let wire = patch.wire_node(
             format!("{}-Conv", node.name),
             self.as_conv(),
-            [add_dim[0], lin.into(), bias.into()].as_ref(),
-        )?;
-
-        let rm_dim =
-            target.wire_node(&*node.name, tract_core::ops::array::RmDims::new(vec![0]), &*conv)?;
-
-        Ok(rm_dim)
+            [input, lin.into(), bias.into()].as_ref(),
+        )?[0];
+        patch.shunt_outside(model, node.id.into(), wire)?;
+        Ok(Some(patch))
     }
+
+    as_op!();
 }

@@ -9,8 +9,8 @@ use tensorflow::Graph;
 use tensorflow::Session;
 use tensorflow::SessionRunArgs;
 
-use tract_core::ndarray::*;
-use tract_core::prelude::*;
+use tract_hir::prelude::*;
+use tract_ndarray::prelude::*;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -232,13 +232,7 @@ fn convert_output(
     macro_rules! convert {
         ($dt:ident) => {
             match step.fetch(output) {
-                Err(r) => {
-                    if r.code() == tensorflow::Code::InvalidArgument {
-                        unsafe { Tensor::null::<$dt>(&[]).unwrap().into() }
-                    } else {
-                        Err(r)?
-                    }
-                }
+                Err(r) => Err(r)?,
                 Ok(output) => tensor_to_array::<$dt>(&output)?.into(),
             }
         };

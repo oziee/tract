@@ -2,7 +2,7 @@ use crate::internal::*;
 use crate::pulse::delay::Delay;
 use ndarray::*;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum PadMode {
     Constant(Arc<Tensor>),
     Reflect,
@@ -15,11 +15,12 @@ impl Default for PadMode {
     }
 }
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct Pad {
-    pads: Vec<(usize, usize)>,
+    pub pads: Vec<(usize, usize)>,
     mode: PadMode,
 }
+tract_linalg::impl_dyn_hash!(Pad);
 
 impl Pad {
     fn eval_t<T>(&self, input: Arc<Tensor>) -> TractResult<Arc<Tensor>>
@@ -88,6 +89,11 @@ impl Op for Pad {
         "Pad".into()
     }
 
+    fn info(&self) -> TractResult<Vec<String>> {
+        Ok(vec![format!("Mode: {:?}, pads: {:?})", self.mode, self.pads,)])
+    }
+
+    canonic!();
     op_as_typed_op!();
     not_a_pulsed_op!();
 }
@@ -100,29 +106,8 @@ impl StatelessOp for Pad {
     }
 }
 
-impl InferenceRulesOp for Pad {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 1)?;
-        check_output_arity(&outputs, 1)?;
-        s.equals(&inputs[0].datum_type, &outputs[0].datum_type)?;
-        s.equals(&inputs[0].rank, &outputs[0].rank)?;
-        for (ix, &(a, b)) in self.pads.iter().enumerate() {
-            s.equals(&inputs[0].shape[ix], outputs[0].shape[ix].bex() - a.to_dim() - b.to_dim())?;
-        }
-        Ok(())
-    }
-
-    inference_op_as_op!();
-    to_typed!();
-}
-
 impl TypedOp for Pad {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         let mut fact = inputs[0].clone();
@@ -130,6 +115,18 @@ impl TypedOp for Pad {
             fact.shape.set_dim(ix, fact.shape.dim(ix).clone() + *b + *e)?
         }
         Ok(tvec!(fact))
+    }
+
+    fn declutter(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+    ) -> TractResult<Option<TypedModelPatch>> {
+        if self.pads.iter().all(|p| p.0 == 0 && p.1 == 0) {
+            Ok(Some(TypedModelPatch::shunt_one_op(model, node)?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn pulsify(
@@ -167,7 +164,7 @@ impl TypedOp for Pad {
                 &[input],
             )?[0];
         }
-        let op = PulsePad::<f32>::new(
+        let op = PulsePad::new(
             fact.axis,
             pulse,
             before,
@@ -180,21 +177,32 @@ impl TypedOp for Pad {
     }
 }
 
-#[derive(Debug, Clone, Default, new)]
-struct PulsePadOpState<T: Datum + Copy> {
+#[derive(Debug, Clone, Default, new, Hash)]
+struct PulsePadOpState {
     current_pos: usize,
     last_valid_frame: Option<Tensor>,
-    _slimer: PhantomData<T>,
 }
 
-impl<T: Datum + Copy> OpState for PulsePadOpState<T> {
+impl OpState for PulsePadOpState {
     fn eval(
         &mut self,
         session: &mut SessionState,
         op: &dyn Op,
         mut inputs: TVec<Arc<Tensor>>,
     ) -> TractResult<TVec<Arc<Tensor>>> {
-        let op = op.downcast_ref::<PulsePad<T>>().ok_or("Wrong Op type")?;
+        let input = args_1!(inputs).into_tensor();
+        let op = op.downcast_ref::<PulsePad>().ok_or("Wrong Op type")?;
+        let tensor = dispatch_copy!(Self::eval_t(input.datum_type())(self, session, op, input))?;
+        Ok(tvec!(tensor.into_arc_tensor()))
+    }
+}
+impl PulsePadOpState {
+    fn eval_t<T: Datum + Copy>(
+        &mut self,
+        session: &mut SessionState,
+        op: &PulsePad,
+        input: Tensor,
+    ) -> TractResult<Tensor> {
         let pulse_begin = self.current_pos;
         let pulse_end = self.current_pos + op.pulse;
         self.current_pos += op.pulse;
@@ -206,7 +214,7 @@ impl<T: Datum + Copy> OpState for PulsePadOpState<T> {
         if let PadMode::Edge = op.mode {
             if op.after > 0 && pulse_begin < end_input {
                 let latest_valid_frame = (end_input - pulse_begin).min(op.pulse) - 1;
-                let data = inputs[0].to_array_view::<T>()?;
+                let data = input.to_array_view::<T>()?;
                 self.last_valid_frame = Some(
                     data.index_axis(Axis(op.axis), latest_valid_frame).to_owned().into_tensor(),
                 );
@@ -215,16 +223,15 @@ impl<T: Datum + Copy> OpState for PulsePadOpState<T> {
 
         // pulse is entirely in valid input, just forward
         if pulse_begin >= op.begin_input && pulse_end <= end_input {
-            return Ok(inputs);
+            return Ok(input);
         }
         // pulse is entirely before or after output is valid, just forward
         if pulse_end <= op.begin_input - op.before
             || pulse_begin >= end_input.saturating_add(op.after)
         {
-            return Ok(inputs);
+            return Ok(input);
         }
-        let input = args_1!(inputs);
-        let mut data = input.into_tensor().into_array::<T>()?;
+        let mut data = input.into_array::<T>()?;
 
         if pulse_begin < op.begin_input {
             let fill_up_to = (op.begin_input - pulse_begin).min(op.pulse);
@@ -263,12 +270,12 @@ impl<T: Datum + Copy> OpState for PulsePadOpState<T> {
             }
         }
 
-        Ok(tvec!(data.into_arc_tensor()))
+        Ok(data.into_tensor())
     }
 }
 
-#[derive(Debug, Clone, Default, new)]
-struct PulsePad<T: Datum + Copy> {
+#[derive(Debug, Clone, Default, new, Hash)]
+struct PulsePad {
     axis: usize,
     pulse: usize,
     before: usize,
@@ -276,37 +283,46 @@ struct PulsePad<T: Datum + Copy> {
     begin_input: usize,
     end_input: TDim,
     mode: PadMode,
-    _slimer: PhantomData<T>,
 }
 
-impl<T: Datum + Copy> Op for PulsePad<T> {
+tract_linalg::impl_dyn_hash!(PulsePad);
+
+impl Op for PulsePad {
     fn name(&self) -> Cow<str> {
-        "Pad".into()
+        "PulsePad".into()
     }
 
+    fn info(&self) -> TractResult<Vec<String>> {
+        Ok(vec![format!(
+            "Mode: {:?}, axis: {} before: {} after: {}",
+            self.mode, self.axis, self.before, self.after,
+        )])
+    }
+
+    canonic!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }
 
-impl<T: Datum + Copy> StatefullOp for PulsePad<T> {
+impl StatefullOp for PulsePad {
     fn state(
         &self,
         _session: &mut SessionState,
         _node_id: usize,
     ) -> TractResult<Option<Box<dyn OpState>>> {
-        Ok(Some(Box::new(PulsePadOpState::<T>::default())))
+        Ok(Some(Box::new(PulsePadOpState::default())))
     }
 }
 
-impl<T: Datum + Copy> TypedOp for PulsePad<T> {
+impl TypedOp for PulsePad {
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         Ok(tvec!(inputs[0].clone()))
     }
 
-    typed_op_as_op!();
+    as_op!();
 }
 
-impl<T: Datum + Copy> PulsedOp for PulsePad<T> {
+impl PulsedOp for PulsePad {
     fn pulsed_output_facts(&self, inputs: &[&PulsedFact]) -> TractResult<TVec<PulsedFact>> {
         let mut fact = inputs[0].clone();
         fact.dim += (self.before + self.after).to_dim();
@@ -314,6 +330,6 @@ impl<T: Datum + Copy> PulsedOp for PulsePad<T> {
         Ok(tvec!(fact))
     }
 
-    pulsed_op_as_op!();
+    as_op!();
     pulsed_op_to_typed_op!();
 }

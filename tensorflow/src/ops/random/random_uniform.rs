@@ -1,6 +1,6 @@
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 use super::philox::Philox4x32x10;
 
@@ -21,12 +21,14 @@ pub fn random_uniform_int(
     Ok(Box::new(RandomUniformInt::new(dtype, seed, seed2)))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct RandomUniform {
     t: DatumType,
     seed1: u64,
     seed2: u64,
 }
+
+tract_linalg::impl_dyn_hash!(RandomUniform);
 
 impl Op for RandomUniform {
     fn name(&self) -> Cow<str> {
@@ -76,7 +78,7 @@ impl InferenceRulesOp for RandomUniform {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -99,13 +101,15 @@ impl InferenceRulesOp for RandomUniform {
     }
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct TypedRandomUniform {
     t: DatumType,
     seed1: u64,
     seed2: u64,
     shape: TVec<TDim>,
 }
+
+tract_linalg::impl_dyn_hash!(TypedRandomUniform);
 
 impl Op for TypedRandomUniform {
     fn name(&self) -> Cow<str> {
@@ -143,7 +147,7 @@ impl TypedOp for TypedRandomUniform {
         Ok(tvec!(TypedFact::dt_shape(self.t, &*self.shape)?))
     }
 
-    typed_op_as_op!();
+    as_op!();
 }
 
 pub fn make_f32(shape: &[usize], seed1: u64, seed2: u64) -> TractResult<Arc<Tensor>> {
@@ -160,12 +164,14 @@ pub fn make_f32(shape: &[usize], seed1: u64, seed2: u64) -> TractResult<Arc<Tens
     }
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct RandomUniformInt {
     t: DatumType,
     seed1: u64,
     seed2: u64,
 }
+
+tract_linalg::impl_dyn_hash!(RandomUniformInt);
 
 impl RandomUniformInt {
     pub fn make_i32(&self, shape: &[usize], lo: i32, hi: i32) -> TractResult<Arc<Tensor>> {
@@ -240,5 +246,5 @@ impl InferenceRulesOp for RandomUniformInt {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

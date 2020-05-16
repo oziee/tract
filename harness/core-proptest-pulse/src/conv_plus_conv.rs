@@ -1,9 +1,6 @@
 use proptest::proptest;
 use proptest::test_runner::TestCaseResult;
-use tract_core::dimfact;
-use tract_core::internal::*;
-use tract_core::ndarray::*;
-use tract_core::shapefact;
+use tract_hir::internal::*;
 
 use super::*;
 
@@ -16,7 +13,7 @@ struct ConvOp {
 impl ConvOp {
     fn chain(&self, name: &str, model: &mut InferenceModel, after: OutletId) -> OutletId {
         let filters = model.add_const(format!("{}-kernel", name), self.ker.clone()).unwrap();
-        let mut conv = tract_core::ops::cnn::Conv::default();
+        let mut conv = tract_hir::ops::cnn::Conv::default();
         conv.dilations = Some(tvec!(self.dilation));
         conv.strides = Some(tvec!(self.stride));
         model.wire_node(name, conv, &[after, filters]).unwrap()[0]
@@ -69,7 +66,7 @@ impl ConvPlusConvProblem {
     pub fn run(&self) -> TestCaseResult {
         let mut model = InferenceModel::default();
         let input = model
-            .add_source("a", InferenceFact::dt_shape(f32::datum_type(), shapefact!(1, 1, S)))
+            .add_source("a", InferenceFact::dt_shape(f32::datum_type(), shapefactoid!(1, 1, S)))
             .unwrap();
         let id = self.conv1.chain("conv1", &mut model, input);
         let _id = self.conv2.chain("conv2", &mut model, id);

@@ -1,9 +1,8 @@
 use crate::model::ParsingContext;
 use crate::pb::*;
-use tract_core::internal::*;
-use tract_core::ndarray;
-use tract_core::ndarray::*;
-use tract_core::ops as core_ops;
+use tract_hir::internal::*;
+use tract_hir::ops;
+use tract_ndarray::prelude::*;
 
 pub fn gru(
     _ctx: &ParsingContext,
@@ -23,7 +22,7 @@ pub fn gru(
     Ok((Box::new(gru), vec![]))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct GRU {
     pub optional_bias_input: Option<usize>,
     pub optional_sequence_lens_input: Option<usize>,
@@ -35,6 +34,8 @@ pub struct GRU {
     pub linear_before_reset: bool,
 }
 
+tract_linalg::impl_dyn_hash!(GRU);
+
 impl Default for GRU {
     fn default() -> GRU {
         GRU {
@@ -43,8 +44,8 @@ impl Default for GRU {
             optional_initial_h_input: None,
             optional_y_output: None,
             optional_y_h_output: None,
-            f: Box::new(core_ops::nn::sigmoid()),
-            g: Box::new(core_ops::math::tanh()),
+            f: Box::new(ops::nn::sigmoid()),
+            g: Box::new(ops::math::tanh()),
             linear_before_reset: false,
         }
     }
@@ -125,7 +126,7 @@ impl InferenceRulesOp for GRU {
         Ok(self.optional_y_output.is_some() as usize + self.optional_y_h_output.is_some() as usize)
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     #[allow(non_snake_case)]
     fn to_typed(
@@ -135,7 +136,7 @@ impl InferenceRulesOp for GRU {
         target: &mut TypedModel,
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
-        use tract_core::ops::{array, math, scan};
+        use ops::{array, math, matmul, scan};
 
         let x_fact = target.outlet_fact(mapping[&node.inputs[0]])?.clone();
         let r_fact = target.outlet_fact(mapping[&node.inputs[2]])?;
@@ -174,28 +175,25 @@ impl InferenceRulesOp for GRU {
         let mut x_source_fact = x_fact.clone();
         x_source_fact.shape.set_dim(0, 1.to_dim())?;
         let x_source = body.add_source("x_source", x_source_fact)?.into();
-        wire!(Xt = array::RmDims::new(vec![0]), x_source);
+        wire!(Xt = AxisOp::Rm(0), x_source);
 
         // W: onnx interface: [num_directions, 3*hidden_size, input_size]
         // scan interfaces: [3*hidden_size, input_size]
-        target_wire!(w = tract_core::ops::array::RmDims::new(vec![0]), mapping[&node.inputs[1]]);
+        target_wire!(w = AxisOp::Rm(0), mapping[&node.inputs[1]]);
         outer_inputs.push(w);
         input_mapping.push(scan::InputMapping::Full { slot: 1 });
         let W = body.add_source("w", target.outlet_fact(w)?.clone())?.into();
 
         // R: onnx interface: [num_directions, 3*hidden_size, hidden_size]
         // scan interfaces: [3*hidden_size, hidden_size]
-        target_wire!(r = tract_core::ops::array::RmDims::new(vec![0]), mapping[&node.inputs[2]]);
+        target_wire!(r = AxisOp::Rm(0), mapping[&node.inputs[2]]);
         outer_inputs.push(r);
         input_mapping.push(scan::InputMapping::Full { slot: 2 });
         let R = body.add_source("r", target.outlet_fact(r)?.clone())?.into();
 
         // B: onnx interface: [num_directions, 6*hidden_size]
         let b = if let Some(slot) = self.optional_bias_input {
-            target_wire!(
-                b = tract_core::ops::array::RmDims::new(vec![0]),
-                mapping[&node.inputs[slot]]
-            );
+            target_wire!(b = AxisOp::Rm(0), mapping[&node.inputs[slot]]);
             outer_inputs.push(b);
             input_mapping.push(scan::InputMapping::Full { slot });
             let b = body.add_source("b", target.outlet_fact(b)?.clone())?.into();
@@ -213,16 +211,13 @@ impl InferenceRulesOp for GRU {
         // scan inner: [chunk=1, batch_size, hidden_size]
         // onnx inner: [batch_size, hidden_size]
         let initializer = if let Some(initial_h_input) = self.optional_initial_h_input {
-            target_wire!(
-                h = tract_core::ops::array::RmDims::new(vec![0]),
-                mapping[&node.inputs[initial_h_input]]
-            );
-            target_wire!(h_chunk = tract_core::ops::array::AddDims::new(vec![0]), h);
+            target_wire!(h = AxisOp::Rm(0), mapping[&node.inputs[initial_h_input]]);
+            target_wire!(h_chunk = AxisOp::Add(0), h);
             outer_inputs.push(h_chunk);
             scan::StateInitializer::FromInput(initial_h_input)
         } else {
             scan::StateInitializer::Value(
-                ndarray::Array3::<f32>::zeros((1, b_size, h_size)).into_arc_tensor(),
+                tract_ndarray::Array3::<f32>::zeros((1, b_size, h_size)).into_arc_tensor(),
             )
         };
         input_mapping.push(scan::InputMapping::State { initializer });
@@ -233,7 +228,7 @@ impl InferenceRulesOp for GRU {
             )?
             .into();
 
-        wire!(Ht_1 = array::RmDims::new(vec!(0)), h_source);
+        wire!(Ht_1 = AxisOp::Rm(0), h_source);
 
         wire!(Rz = array::Slice::new(0, 0 * h_size, 1 * h_size), R);
         wire!(Rr = array::Slice::new(0, 1 * h_size, 2 * h_size), R);
@@ -244,64 +239,64 @@ impl InferenceRulesOp for GRU {
         wire!(Wh = array::Slice::new(0, 2 * h_size, 3 * h_size), W);
 
         // zt = f(Xt*(Wz^T) + Ht-1*(Rz^T) + Wbz + Rbz)
-        wire!(Xt_WzT = math::MatMul::default().with_b_trans(true), Xt, Wz);
-        wire!(Ht_1_RzT = math::MatMul::default().with_b_trans(true), Ht_1, Rz);
-        wire!(zt0 = math::add::bin(), Xt_WzT, Ht_1_RzT);
+        wire!(Xt_WzT = matmul::MatMul::default().with_b_trans(true), Xt, Wz);
+        wire!(Ht_1_RzT = matmul::MatMul::default().with_b_trans(true), Ht_1, Rz);
+        wire!(zt0 = math::add::bin_typed(), Xt_WzT, Ht_1_RzT);
         let mut zt0 = zt0;
         if let Some(b) = b {
             wire!(Wbz = array::Slice::new(0, 0 * h_size, 1 * h_size), b);
             wire!(Rbz = array::Slice::new(0, 3 * h_size, 4 * h_size), b);
-            wire!(Wbz_Rbz = math::add::bin(), Wbz, Rbz);
-            wire!(zt0_biased = math::add::bin(), zt0, Wbz_Rbz);
+            wire!(Wbz_Rbz = math::add::bin_typed(), Wbz, Rbz);
+            wire!(zt0_biased = math::add::bin_typed(), zt0, Wbz_Rbz);
             zt0 = zt0_biased
         };
         wire!(zt = self.f.clone(), zt0);
 
         // rt = f(Xt*(Wr^T) + Ht-1*(Rr^T) + Wbr + Rbr)
-        wire!(Xt_WrT = math::MatMul::default().with_b_trans(true), Xt, Wr);
-        wire!(Ht_1_RrT = math::MatMul::default().with_b_trans(true), Ht_1, Rr);
-        wire!(rt0 = math::add::bin(), Xt_WrT, Ht_1_RrT);
+        wire!(Xt_WrT = matmul::MatMul::default().with_b_trans(true), Xt, Wr);
+        wire!(Ht_1_RrT = matmul::MatMul::default().with_b_trans(true), Ht_1, Rr);
+        wire!(rt0 = math::add::bin_typed(), Xt_WrT, Ht_1_RrT);
         let mut rt0 = rt0;
         if let Some(b) = b {
             wire!(Wbr = array::Slice::new(0, 1 * h_size, 2 * h_size), b);
             wire!(Rbr = array::Slice::new(0, 4 * h_size, 5 * h_size), b);
-            wire!(Wbr_Rbr = math::add::bin(), Wbr, Rbr);
-            wire!(rt0_biased = math::add::bin(), rt0, Wbr_Rbr);
+            wire!(Wbr_Rbr = math::add::bin_typed(), Wbr, Rbr);
+            wire!(rt0_biased = math::add::bin_typed(), rt0, Wbr_Rbr);
             rt0 = rt0_biased
         };
         wire!(rt = self.f.clone(), rt0);
 
         // ht = g(Xt*(Wh^T) + (rt (.) Ht-1)*(Rh^T) + Rbh + Wbh) # default, when linear_before_reset = 0
         // ht = g(Xt*(Wh^T) + (rt (.) (Ht-1*(Rh^T) + Rbh)) + Wbh) # when linear_before_reset != 0
-        wire!(Xt_WhT = math::MatMul::default().with_b_trans(true), Xt, Wh);
+        wire!(Xt_WhT = matmul::MatMul::default().with_b_trans(true), Xt, Wh);
         let rt_Ht_1_RhT = if self.linear_before_reset {
-            wire!(Ht_1_RhT = math::MatMul::default().with_b_trans(true), Ht_1, Rh);
-            wire!(rt_Ht_1_RhT = math::mul::bin(), rt, Ht_1_RhT);
+            wire!(Ht_1_RhT = matmul::MatMul::default().with_b_trans(true), Ht_1, Rh);
+            wire!(rt_Ht_1_RhT = math::mul::bin_typed(), rt, Ht_1_RhT);
             rt_Ht_1_RhT
         } else {
-            wire!(rt_Ht_1 = math::mul::bin(), rt, Ht_1);
-            wire!(rt_Ht_1_RhT = math::MatMul::default().with_b_trans(true), rt_Ht_1, Rh);
+            wire!(rt_Ht_1 = math::mul::bin_typed(), rt, Ht_1);
+            wire!(rt_Ht_1_RhT = matmul::MatMul::default().with_b_trans(true), rt_Ht_1, Rh);
             rt_Ht_1_RhT
         };
-        wire!(ht0 = math::add::bin(), Xt_WhT, rt_Ht_1_RhT);
+        wire!(ht0 = math::add::bin_typed(), Xt_WhT, rt_Ht_1_RhT);
         let mut ht0 = ht0;
         if let Some(b) = b {
             wire!(Wbh = array::Slice::new(0, 2 * h_size, 3 * h_size), b);
             wire!(Rbh = array::Slice::new(0, 5 * h_size, 6 * h_size), b);
-            wire!(Wbh_Rbh = math::add::bin(), Wbh, Rbh);
-            wire!(ht0_biased = math::add::bin(), ht0, Wbh_Rbh);
+            wire!(Wbh_Rbh = math::add::bin_typed(), Wbh, Rbh);
+            wire!(ht0_biased = math::add::bin_typed(), ht0, Wbh_Rbh);
             ht0 = ht0_biased
         }
         wire!(ht = self.g.clone(), ht0);
 
         // Ht = (1 - zt) (.) ht + zt (.) Ht-1
         let one: OutletId = body.add_const("one", tensor0(1f32))?.into();
-        wire!(one_sub_zt = math::sub::bin(), one, zt);
-        wire!(one_sub_zt_ht = math::mul::bin(), one_sub_zt, ht);
-        wire!(zt_Ht_1 = math::mul::bin(), zt, Ht_1);
-        wire!(Ht = math::add::bin(), one_sub_zt_ht, zt_Ht_1);
+        wire!(one_sub_zt = math::sub::bin_typed(), one, zt);
+        wire!(one_sub_zt_ht = math::mul::bin_typed(), one_sub_zt, ht);
+        wire!(zt_Ht_1 = math::mul::bin_typed(), zt, Ht_1);
+        wire!(Ht = math::add::bin_typed(), one_sub_zt_ht, zt_Ht_1);
 
-        wire!(y_h = array::AddDims::new(vec!(0)), Ht);
+        wire!(y_h = AxisOp::Add(0), Ht);
         body.set_output_outlets(&[y_h])?;
 
         let output_mapping = scan::OutputMapping {
@@ -315,7 +310,7 @@ impl InferenceRulesOp for GRU {
 
         let scan_outputs = target.wire_node(
             &*node.name,
-            scan::Typed::new(
+            ops::scan::TypedScan::new(
                 body,
                 input_mapping,
                 vec![output_mapping],
@@ -326,7 +321,7 @@ impl InferenceRulesOp for GRU {
 
         let mut result = tvec!();
         if let Some(slot) = self.optional_y_output {
-            target_wire!(y = array::AddDims::new(vec!(0)), scan_outputs[slot]);
+            target_wire!(y = AxisOp::Add(0), scan_outputs[slot]);
             result.push(y);
         }
         if let Some(slot) = self.optional_y_h_output {

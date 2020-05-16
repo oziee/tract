@@ -1,14 +1,16 @@
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use num_traits::AsPrimitive;
 use std::ops::{Add, Div, Mul, Sub};
-use tract_core::internal::*;
-use tract_core::ndarray::prelude::*;
+use tract_hir::internal::*;
+use tract_ndarray::prelude::*;
+use tract_num_traits::AsPrimitive;
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct Range {
     dtype: DatumType,
 }
+
+tract_linalg::impl_dyn_hash!(Range);
 
 pub fn range(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     let dtype = pb.get_attr_datum_type("Tidx")?;
@@ -70,7 +72,7 @@ impl InferenceRulesOp for Range {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,

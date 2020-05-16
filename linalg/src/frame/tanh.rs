@@ -11,14 +11,14 @@ impl TanhFunc for f32 {
     }
 }
 
-pub trait Tanh<T>: Send + Sync + Debug + objekt::Clone
+pub trait Tanh<T>: Send + Sync + Debug + dyn_clone::DynClone
 where
     T: Copy + Debug + PartialEq + Send + Sync + TanhFunc,
 {
     fn run(&self, vec: &mut [T]);
 }
 
-clone_trait_object!(<T> Tanh<T> where T: Copy);
+dyn_clone::clone_trait_object!(<T> Tanh<T> where T: Copy);
 
 #[derive(Debug, Clone, new)]
 pub struct TanhImpl<K, T>
@@ -56,7 +56,7 @@ where
     }
 }
 
-pub trait TanhKer<T>: Send + Sync + Debug + objekt::Clone + Clone
+pub trait TanhKer<T>: Send + Sync + Debug + dyn_clone::DynClone + Clone
 where
     T: Copy + Debug + PartialEq + Send + Sync,
 {
@@ -118,6 +118,6 @@ pub mod test {
         let mut found = values.to_vec();
         op.run(&mut found);
         let expected = values.iter().map(|x| x.tanh()).collect::<Vec<_>>();
-        crate::check_close(&*found, &*expected)
+        crate::test::check_close(&*found, &*expected)
     }
 }

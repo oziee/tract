@@ -1,11 +1,10 @@
 use crate::internal::*;
+use crate::model::translator::Translate;
 use std::fmt;
-
-use std::convert::TryFrom;
 
 pub mod delay;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct PulsedFact {
     pub datum_type: DatumType,
     pub shape: TVec<usize>,
@@ -13,6 +12,8 @@ pub struct PulsedFact {
     pub dim: TDim,
     pub delay: usize,
 }
+
+tract_linalg::impl_dyn_hash!(PulsedFact);
 
 impl fmt::Debug for PulsedFact {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -30,15 +31,28 @@ impl fmt::Debug for PulsedFact {
 }
 
 impl Fact for PulsedFact {
-    fn to_tensor_fact(&self) -> InferenceFact {
-        InferenceFact::dt_shape(self.datum_type, &self.shape)
+    fn to_typed_fact(&self) -> TractResult<TypedFact> {
+        Ok(self.into())
+    }
+
+    fn same_as(&self, other: &dyn Fact) -> bool {
+        if let Some(other) = other.downcast_ref::<PulsedFact>() {
+            other == self
+        } else {
+            false
+        }
     }
 }
 
-impl TryFrom<PulsedFact> for TypedFact {
-    type Error = TractError;
-    fn try_from(fact: PulsedFact) -> TractResult<TypedFact> {
-        TypedFact::dt_shape(fact.datum_type, &*fact.shape)
+impl<'a> From<&'a PulsedFact> for TypedFact {
+    fn from(fact: &'a PulsedFact) -> TypedFact {
+        TypedFact::dt_shape(fact.datum_type, &*fact.shape).unwrap()
+    }
+}
+
+impl<'a> From<&'a Box<dyn PulsedOp>> for Box<dyn TypedOp> {
+    fn from(op: &'a Box<dyn PulsedOp>) -> Box<dyn TypedOp> {
+        op.to_typed()
     }
 }
 
@@ -70,7 +84,7 @@ impl PulsedFact {
 
     pub fn to_streaming_fact(&self) -> NormalizedFact {
         let mut info = self.to_pulse_fact();
-        info.shape.stream_info = Some(StreamInfo { axis: self.axis, len: self.dim.clone() });
+        info.shape.stream_info = Some(StreamFact { axis: self.axis, len: self.dim.clone() });
         info
     }
 }
@@ -87,11 +101,32 @@ impl PulsedModel {
         source: &NormalizedModel,
         pulse: usize,
     ) -> TractResult<(PulsedModel, HashMap<OutletId, OutletId>)> {
-        crate::model::compact::translate(source, &pulse)
+        Pulsifier(pulse).translate_model_with_mappings(source)
     }
 
     pub fn into_typed(self) -> TractResult<TypedModel> {
-        Ok(crate::model::compact::translate(&self, &())?.0)
+        crate::model::translator::IntoTranslator.translate_model(&self)
+    }
+}
+
+#[derive(Debug)]
+struct Pulsifier(usize);
+impl
+    crate::model::translator::Translate<
+        NormalizedFact,
+        Box<dyn TypedOp>,
+        crate::pulse::PulsedFact,
+        Box<dyn PulsedOp>,
+    > for Pulsifier
+{
+    fn translate_node(
+        &self,
+        source: &NormalizedModel,
+        node: &NormalizedNode,
+        target: &mut PulsedModel,
+        mapping: &HashMap<OutletId, OutletId>,
+    ) -> TractResult<TVec<OutletId>> {
+        node.op.pulsify(source, node, target, mapping, self.0)
     }
 }
 
@@ -101,37 +136,43 @@ mod tests {
 
     #[test]
     fn test_source_must_stream() {
-        let mut model = InferenceModel::default();
-        let _a =
-            model.add_source("a", InferenceFact::dt_shape(DatumType::F32, vec![1, 2, 3])).unwrap();
+        let mut model = TypedModel::default();
+        let _a = model
+            .add_source("a", TypedFact::dt_shape(f32::datum_type(), [1, 2, 3].as_ref()).unwrap())
+            .unwrap();
         model.auto_outputs().unwrap();
-        assert!(
-            PulsedModel::new(&model.into_typed().unwrap().into_normalized().unwrap(), 4).is_err()
-        );
+        assert!(PulsedModel::new(&model.into_normalized().unwrap(), 4).is_err());
 
-        let mut model = InferenceModel::default();
+        let mut model = TypedModel::default();
         let _a = model
             .add_source(
                 "a",
-                InferenceFact::dt_shape(DatumType::F32, vec![1.to_dim(), TDim::s(), 3.to_dim()]),
+                TypedFact::dt_shape(
+                    f32::datum_type(),
+                    [1.to_dim(), TDim::s(), 3.to_dim()].as_ref(),
+                )
+                .unwrap(),
             )
             .unwrap();
         model.auto_outputs().unwrap();
-        let pulse =
-            PulsedModel::new(&model.into_typed().unwrap().into_normalized().unwrap(), 4).unwrap();
+        let pulse = PulsedModel::new(&model.into_normalized().unwrap(), 4).unwrap();
         assert_eq!(
-            pulse.outlet_fact(OutletId::new(0, 0)).unwrap().to_tensor_fact(),
-            InferenceFact::dt_shape(DatumType::F32, vec!(1, 4, 3))
+            pulse.outlet_fact(OutletId::new(0, 0)).unwrap().to_typed_fact().unwrap(),
+            TypedFact::dt_shape(DatumType::F32, [1usize, 4, 3].as_ref()).unwrap()
         );
     }
 
     #[test]
     fn test_immediate() {
-        let mut model = InferenceModel::default();
+        let mut model = TypedModel::default();
         let _a = model
             .add_source(
                 "a",
-                InferenceFact::dt_shape(DatumType::F32, vec![TDim::s(), 2.to_dim(), 3.to_dim()]),
+                TypedFact::dt_shape(
+                    f32::datum_type(),
+                    [TDim::s(), 2.to_dim(), 3.to_dim()].as_ref(),
+                )
+                .unwrap(),
             )
             .unwrap();
         model.auto_outputs().unwrap();
@@ -139,12 +180,12 @@ mod tests {
         let pulse = PulsedModel::new(&model.into_normalized().unwrap(), 4).unwrap();
 
         assert_eq!(
-            pulse.input_fact(0).unwrap().to_tensor_fact(),
-            InferenceFact::dt_shape(DatumType::F32, vec!(4, 2, 3))
+            pulse.input_fact(0).unwrap().to_typed_fact().unwrap(),
+            TypedFact::dt_shape(DatumType::F32, &*vec!(4, 2, 3)).unwrap()
         );
         assert_eq!(
-            pulse.output_fact(0).unwrap().to_tensor_fact(),
-            InferenceFact::dt_shape(DatumType::F32, vec!(4, 2, 3))
+            pulse.output_fact(0).unwrap().to_typed_fact().unwrap(),
+            TypedFact::dt_shape(DatumType::F32, &*vec!(4, 2, 3)).unwrap()
         );
     }
 }

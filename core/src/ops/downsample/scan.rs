@@ -6,7 +6,7 @@ use crate::ops::scan::*;
 pub fn pull_downsample_over_scan(
     model: &TypedModel,
     scan_node: &TypedNode,
-    scan_op: &ops::scan::Typed,
+    scan_op: &ops::scan::TypedScan,
     down_node: &TypedNode,
     down_op: &Downsample,
 ) -> TractResult<Option<TypedModelPatch>> {
@@ -29,8 +29,10 @@ pub fn pull_downsample_over_scan(
 
     for input in inner_model.input_outlets()? {
         let input = inner_model.node(input.node);
-        if input.outputs[0].successors.len() > 1
-            || !inner_model.node(input.outputs[0].successors[0].node).op().same_as(down_op)
+        if input.outputs[0]
+            .successors
+            .iter()
+            .any(|succ| !inner_model.node(succ.node).op().same_as(down_op))
         {
             return Ok(None);
         }
@@ -40,9 +42,11 @@ pub fn pull_downsample_over_scan(
     for input in inputs {
         let ref mut fact = inner_model.node_mut(input.node).outputs[0].fact;
         *fact = down_op.transform_fact(fact)?;
-        let ds = inner_model.node(input.node).outputs[0].successors[0].node;
-        TypedModelPatch::shunt_one_op(&inner_model as _, inner_model.node(ds))?
-            .apply(&mut inner_model)?;
+        let downsamples = inner_model.node(input.node).outputs[0].successors.clone();
+        for ds in downsamples {
+            TypedModelPatch::shunt_one_op(&inner_model as _, inner_model.node(ds.node))?
+                .apply(&mut inner_model)?;
+        }
     }
 
     let inner_model = crate::model::compact::compact(&inner_model.declutter()?)?;
@@ -61,7 +65,7 @@ pub fn pull_downsample_over_scan(
                 if chunk.to_integer()? as usize % down_op.stride != 0 {
                     return Ok(None);
                 }
-                *chunk = chunk.div_ceil(down_op.stride.to_dim())
+                *chunk = chunk.div_ceil(down_op.stride as u32)
             }
             _ => (),
         }
@@ -71,7 +75,7 @@ pub fn pull_downsample_over_scan(
             return Ok(None);
         }
         output.full_dim_hint.as_mut().map(|d| *d = down_op.transform_dim(d));
-        output.chunk = output.chunk.div_ceil(down_op.stride.to_dim());
+        output.chunk = output.chunk.div_ceil(down_op.stride as u32);
     }
 
     let mut patch = TypedModelPatch::default();
@@ -85,7 +89,7 @@ pub fn pull_downsample_over_scan(
     for ix in 0..scan_node.outputs.len() {
         // FIXME need to check earlier on that all output are followed by a ds
         let succ = scan_node.outputs[ix].successors[0].node;
-        patch.shunt_outside(OutletId::new(succ, 0), scan[ix])?;
+        patch.shunt_outside(model, OutletId::new(succ, 0), scan[ix])?;
     }
     Ok(Some(patch))
 }

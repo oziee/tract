@@ -6,7 +6,6 @@ extern crate env_logger;
 #[macro_use]
 extern crate proptest;
 extern crate tensorflow;
-extern crate tract_core;
 extern crate tract_tensorflow;
 
 mod utils;
@@ -14,9 +13,9 @@ mod utils;
 use crate::utils::*;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseResult;
-use tract_core::internal::*;
-use tract_core::ndarray::prelude::*;
+use tract_ndarray::prelude::*;
 use tract_tensorflow::conform::*;
+use tract_tensorflow::prelude::*;
 use tract_tensorflow::tfpb;
 use tract_tensorflow::tfpb::tensorflow::DataType::DtFloat;
 
@@ -33,7 +32,7 @@ fn img_and_pool() -> BoxedStrategy<(Array4<f32>, (usize, usize), String, usize)>
             )
         })
         .prop_map(|(img_shape, k, img, padding, stride)| {
-            (Array::from_vec(img).into_shape(img_shape).unwrap(), k, padding, stride)
+            (Array::from(img).into_shape(img_shape).unwrap(), k, padding, stride)
         })
         .boxed()
 }

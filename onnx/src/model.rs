@@ -1,8 +1,9 @@
+use std::{ fs, path };
 use std::convert::TryInto;
 
 use std::collections::HashMap;
 
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 use crate::pb;
 use prost::Message;
@@ -107,7 +108,8 @@ impl<'a> ParsingContext<'a> {
             let (op, closures) = match self.framework.op_register.0.get(&pbnode.op_type) {
                 Some(builder) => (builder)(&ctx, pbnode)?,
                 None => (
-                    tract_core::ops::unimpl::UnimplementedOp::new(
+                    tract_hir::ops::unimpl::UnimplementedOp::new(
+                        pbnode.output.len(),
                         &*pbnode.op_type,
                         format!("{:?}", pbnode),
                     )
@@ -198,6 +200,12 @@ impl Onnx {
         let onnx_operator_set_version =
             proto.opset_import.iter().find(|import| import.domain == "").unwrap().version;
         let graph = &proto.graph;
+        debug!("ONNX operator set version: {:?}", onnx_operator_set_version);
+        if onnx_operator_set_version < 9 || onnx_operator_set_version > 10 {
+            warn!("ONNX operator for your model is {}, tract is tested against \
+                  operator set 9 and 10 only. Your model may still work so this is not a hard fail.",
+                  onnx_operator_set_version);
+        }
         let ctx = ParsingContext {
             framework: self,
             model: proto,
@@ -209,10 +217,17 @@ impl Onnx {
 }
 
 impl Framework<pb::ModelProto> for Onnx {
+    fn proto_model_for_path(&self, p: impl AsRef<path::Path>) -> TractResult<pb::ModelProto> {
+        let f = fs::File::open(p)?;
+        let map = unsafe { memmap::Mmap::map(&f)? };
+        Ok(crate::pb::ModelProto::decode(&*map).map_err(|e| format!("{:?}", e))?)
+    }
+
     fn proto_model_for_read(&self, r: &mut dyn std::io::Read) -> TractResult<pb::ModelProto> {
         let mut v = vec![];
         r.read_to_end(&mut v)?;
-        Ok(crate::pb::ModelProto::decode(v).map_err(|e| format!("{:?}", e))?)
+        let b = bytes::Bytes::from(v);
+        Ok(crate::pb::ModelProto::decode(b).map_err(|e| format!("{:?}", e))?)
     }
 
     fn model_for_proto_model(&self, proto: &pb::ModelProto) -> TractResult<InferenceModel> {

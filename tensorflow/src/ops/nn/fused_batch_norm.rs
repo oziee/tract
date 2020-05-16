@@ -1,4 +1,4 @@
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
@@ -8,10 +8,14 @@ pub fn fused_batch_norm(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<
     Ok(Box::new(FusedBatchNorm::new(epsilon)))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Educe)]
+#[educe(Hash)]
 struct FusedBatchNorm {
+    #[educe(Hash(method="hash_f32"))]
     epsilon: f32,
 }
+
+tract_linalg::impl_dyn_hash!(FusedBatchNorm);
 
 impl FusedBatchNorm {
     // (x - mean)*rsqrt_var*scale+offset
@@ -24,7 +28,7 @@ impl FusedBatchNorm {
         mean: &[f32],
         variance: &[f32],
     ) -> TractResult<(Vec<f32>, Vec<f32>)> {
-        use itertools::izip;
+        use tract_itertools::izip;
         let alpha = izip!(variance, scale).map(|(v, s)| s / (v + self.epsilon).sqrt()).collect();
         let beta = izip!(offset, mean, &alpha).map(|(o, m, s)| o - m * s).collect();
         Ok((alpha, beta))
@@ -53,8 +57,8 @@ impl StatelessOp for FusedBatchNorm {
         let mean = mean.as_slice::<f32>()?;
         let variance = variance.as_slice::<f32>()?;
         let (alpha, beta) = self.coeffs(scale, offset, mean, variance)?;
-        let alpha = tract_core::ndarray::arr1(&*alpha);
-        let beta = tract_core::ndarray::arr1(&*beta);
+        let alpha = tract_ndarray::arr1(&*alpha);
+        let beta = tract_ndarray::arr1(&*beta);
         data *= &alpha;
         data += &beta;
         Ok(tvec!(data.into_arc_tensor()))
@@ -89,7 +93,7 @@ impl InferenceRulesOp for FusedBatchNorm {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -114,14 +118,14 @@ impl InferenceRulesOp for FusedBatchNorm {
                 .add_const(format!("{}-slope", node.name), tensor1(&*alpha).into_arc_tensor())?;
             let wire = target.wire_node(
                 format!("{}-mul", node.name),
-                tract_core::ops::math::mul::bin(),
+                tract_hir::ops::math::mul::bin_typed(),
                 [slope, mapping[&node.inputs[0]]].as_ref(),
             )?[0];
             let offset = target
                 .add_const(format!("{}-offset", node.name), tensor1(&*beta).into_arc_tensor())?;
             return target.wire_node(
                 format!("{}-add", node.name),
-                tract_core::ops::math::add::bin(),
+                tract_hir::ops::math::add::bin_typed(),
                 [offset, wire].as_ref(),
             );
         };

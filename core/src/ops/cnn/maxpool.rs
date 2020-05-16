@@ -6,16 +6,18 @@ use crate::ops::cnn::pools::PoolSpec;
 use crate::ops::cnn::Patch;
 use crate::ops::nn::DataShape;
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct MaxPool {
-    pool_spec: PoolSpec,
-    with_index_outputs: Option<DatumType>,
+    pub pool_spec: PoolSpec,
+    pub with_index_outputs: Option<DatumType>,
 }
+
+tract_linalg::impl_dyn_hash!(MaxPool);
 
 impl MaxPool {
     fn to_fixed<T: Datum + Float>(&self, input_shape: &[usize]) -> TractResult<Box<dyn TypedOp>> {
-        let (input_shape, patch, output_shape) = self.pool_spec.compute_geo(input_shape);
-        let op = MaxPoolFixed::<T>::new(patch, input_shape, output_shape, self.with_index_outputs);
+        let (input_shape, patch, output_shape) = self.pool_spec.compute_geo(input_shape)?;
+        let op = MaxPoolFixed::new(patch, input_shape, output_shape, self.with_index_outputs);
         Ok(Box::new(op))
     }
 }
@@ -42,31 +44,6 @@ impl StatelessOp for MaxPool {
         ))?;
         op.as_stateless().unwrap().eval(inputs)
     }
-}
-
-impl InferenceRulesOp for MaxPool {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_output_arity(&outputs, 1 + self.with_index_outputs.is_some() as usize)?;
-        s.equals(&outputs[0].rank, &inputs[0].rank)?;
-        s.equals(&outputs[0].datum_type, &inputs[0].datum_type)?;
-        if let Some(idt) = self.with_index_outputs {
-            s.equals(&outputs[1].datum_type, idt)?;
-            s.equals(&outputs[1].shape, &outputs[0].shape)?;
-        }
-        self.pool_spec.rules_for_shape(s, inputs, outputs)
-    }
-
-    fn nboutputs(&self) -> TractResult<usize> {
-        Ok(1 + self.with_index_outputs.is_some() as usize)
-    }
-
-    inference_op_as_op!();
-    to_typed!();
 }
 
 impl TypedOp for MaxPool {
@@ -104,7 +81,7 @@ impl TypedOp for MaxPool {
         Ok(None)
     }
 
-    typed_op_as_op!();
+    as_op!();
 }
 
 impl PulsedOp for MaxPool {
@@ -117,31 +94,31 @@ impl PulsedOp for MaxPool {
         Ok(facts)
     }
 
-    pulsed_op_as_op!();
+    as_op!();
     pulsed_op_to_typed_op!();
 }
 
-#[derive(Debug, Clone, new)]
-pub struct MaxPoolFixed<T: Datum + Float> {
+tract_linalg::impl_dyn_hash!(MaxPoolFixed);
+
+#[derive(Debug, Clone, new, Hash)]
+pub struct MaxPoolFixed {
     patch: Patch,
     input_shape: DataShape,
     output_shape: DataShape,
     with_index_outputs: Option<DatumType>,
-    _casper: PhantomData<T>,
 }
 
-impl<T: Datum + Float> Op for MaxPoolFixed<T> {
+impl Op for MaxPoolFixed {
     fn name(&self) -> Cow<str> {
-        format!("MaxPool::Fixed<{:?}>", T::datum_type()).into()
+        "MaxPoolFixed".into()
     }
 
     op_as_typed_op!();
     not_a_pulsed_op!();
 }
 
-impl<T: Datum + Float> StatelessOp for MaxPoolFixed<T> {
-    fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
-        let input = args_1!(inputs);
+impl MaxPoolFixed {
+    fn eval_t<T: Datum + Copy + num_traits::Bounded + PartialOrd>(&self, input: &Tensor) -> TractResult<TVec<Arc<Tensor>>> {
         let input: ArrayViewD<T> = input.to_array_view()?;
         let input_ptr = input.as_ptr();
 
@@ -151,11 +128,14 @@ impl<T: Datum + Float> StatelessOp for MaxPoolFixed<T> {
         } else {
             None
         };
+        let n = *self.input_shape.n().unwrap_or(&1);
+        let n_stride_i = self.input_shape.n_stride().unwrap_or(&0);
+        let n_stride_o = self.output_shape.n_stride().unwrap_or(&0);
         unsafe {
             self.patch.visit_output(|visitor| {
-                for n in 0..*self.input_shape.n() {
-                    let input_offset = self.input_shape.n_stride() * n;
-                    let output_offset = self.output_shape.n_stride() * n;
+                for n in 0..n {
+                    let input_offset = n * n_stride_i;
+                    let output_offset = n * n_stride_o;
                     for c in 0..*self.input_shape.c() {
                         let input_offset = input_offset + self.input_shape.c_stride() * c;
                         let output_offset = output_offset + self.output_shape.c_stride() * c;
@@ -187,11 +167,18 @@ impl<T: Datum + Float> StatelessOp for MaxPoolFixed<T> {
     }
 }
 
-impl<T: Datum + Float> TypedOp for MaxPoolFixed<T> {
-    typed_op_as_op!();
+impl StatelessOp for MaxPoolFixed {
+    fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
+        let input = args_1!(inputs);
+        dispatch_numbers!(Self::eval_t(input.datum_type())(self, &*input))
+    }
+}
 
-    fn output_facts(&self, _inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
-        let mut facts = tvec!(TypedFact::dt_shape(T::datum_type(), &*self.output_shape.shape)?);
+impl TypedOp for MaxPoolFixed {
+    as_op!();
+
+    fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
+        let mut facts = tvec!(TypedFact::dt_shape(inputs[0].datum_type, &*self.output_shape.shape)?);
         if let Some(idt) = self.with_index_outputs {
             facts.push(facts[0].clone());
             facts[1].datum_type = idt;

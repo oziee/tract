@@ -1,29 +1,31 @@
 use crate::internal::*;
 use ndarray::prelude::*;
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, PartialEq, Hash)]
 pub struct Slice<D: DimLike + ToDim> {
     pub axis: usize,
     pub start: D,
     pub end: D,
 }
 
-impl<D: DimLike + ToDim> Slice<D> {
-    fn eval_t<T: Datum>(&self, input: Arc<Tensor>) -> TractResult<Arc<Tensor>> {
-        let mut input = input.to_array_view::<T>()?;
+impl<D: DimLike + ToDim + Hash> DynHash for Slice<D> {
+    fn dyn_hash(&self, hasher: &mut dyn std::hash::Hasher) {
+        tract_linalg::hash::dyn_hash(&self, hasher)
+    }
+}
+
+impl<D: DimLike + ToDim + Hash> Slice<D> {
+    unsafe fn eval_t<T: Datum>(&self, input: &Tensor) -> TractResult<Tensor> {
+        let mut input = input.to_array_view_unchecked::<T>();
         input.slice_axis_inplace(
             Axis(self.axis),
             ::ndarray::Slice::from((self.start.to_integer()?)..(self.end.to_integer()?)),
         );
-        if self.start == self.end {
-            // dodge a bug in ndarray :/
-            unsafe { return Ok(Tensor::from_raw::<T>(input.shape(), &[])?.into()) }
-        }
         Ok(Tensor::from(input.to_owned()).into())
     }
 }
 
-impl<D: DimLike + ToDim> Op for Slice<D> {
+impl<D: DimLike + ToDim + Hash> Op for Slice<D> {
     fn name(&self) -> Cow<str> {
         "Slice".into()
     }
@@ -35,44 +37,31 @@ impl<D: DimLike + ToDim> Op for Slice<D> {
     canonic!();
     op_as_typed_op!();
     op_as_pulsed_op!();
+
+    fn same_as(&self, other: &dyn Op) -> bool {
+        if let Some(other) = other.downcast_ref::<Self>() {
+            other == self
+        } else {
+            false
+        }
+    }
+
 }
 
-impl<D: DimLike + ToDim> StatelessOp for Slice<D> {
+impl<D: DimLike + ToDim + Hash> StatelessOp for Slice<D> {
     /// Evaluates the operation given the input tensors.
     fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
         let input = args_1!(inputs);
-        Ok(tvec!(dispatch_datum!(Self::eval_t(input.datum_type())(self, input))?))
+        unsafe {
+            let mut tensor =
+                dispatch_datum_by_size!(Self::eval_t(input.datum_type())(self, &input))?;
+            tensor.set_datum_type(input.datum_type());
+            Ok(tvec!(tensor.into_arc_tensor()))
+        }
     }
 }
 
-impl<D: DimLike + ToDim> InferenceRulesOp for Slice<D> {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 1)?;
-        check_output_arity(&outputs, 1)?;
-        s.equals(&inputs[0].rank, &outputs[0].rank)?;
-        s.equals(&inputs[0].datum_type, &outputs[0].datum_type)?;
-        s.given(&inputs[0].rank, move |s, rank| {
-            (0..(rank as usize)).try_for_each(move |axis| {
-                if self.axis == axis {
-                    s.equals(&outputs[0].shape[axis], &(self.end.clone() - &self.start).to_dim())
-                } else {
-                    s.equals(&outputs[0].shape[axis], &inputs[0].shape[axis])
-                }
-            })
-        })?;
-        Ok(())
-    }
-
-    inference_op_as_op!();
-    to_typed!();
-}
-
-impl<D: DimLike + ToDim> TypedOp for Slice<D> {
+impl<D: DimLike + ToDim + Hash> TypedOp for Slice<D> {
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         let mut fact = inputs[0].clone();
         fact.shape.set_dim(self.axis, (self.end.clone() - &self.start).to_dim())?;
@@ -88,12 +77,41 @@ impl<D: DimLike + ToDim> TypedOp for Slice<D> {
         Ok(axes)
     }
 
+    fn change_axes(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+        _io: InOut,
+        change: &AxisOp,
+    ) -> TractResult<Option<AxisChangeConsequence>> {
+        if let Some(axis) = change.transform_axis(self.axis) {
+            Ok(Some(AxisChangeConsequence::new(
+                model,
+                node,
+                Some(Box::new(Slice { axis, ..self.clone() }) as _),
+                change,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn declutter(
         &self,
         model: &TypedModel,
         node: &TypedNode,
     ) -> TractResult<Option<TypedModelPatch>> {
         let prec = model.node(node.inputs[0].node);
+        if let Some(tdim) = node.op_as::<Slice<TDim>>() {
+            if let (Ok(start), Ok(end)) = (tdim.start.to_integer(), tdim.end.to_integer()) {
+                return Ok(Some(TypedModelPatch::replace_single_op(
+                    model,
+                    node,
+                    &node.inputs,
+                    Slice { start: start as usize, end: end as usize, axis: self.axis },
+                )?));
+            }
+        }
         if self.start == D::zero()
             && (self.end.clone().to_dim()
                 == model.outlet_fact(node.inputs[0])?.shape.dim(self.axis))
@@ -106,31 +124,24 @@ impl<D: DimLike + ToDim> TypedOp for Slice<D> {
         } else {
             return Ok(None);
         };
-        if let Some(concat) = prec.op_as::<super::concat::NormConcat>() {
-            if concat.axis == self.axis {
-                let mut offset = 0;
-                for &input in &prec.inputs {
-                    let len: usize = if let Ok(i) =
-                        model.outlet_fact(input)?.shape.dim(self.axis).to_integer()
-                    {
-                        i as usize
-                    } else {
-                        return Ok(None);
-                    };
-                    if start >= offset && end <= offset + len {
-                        let mut patch = TypedModelPatch::default();
-                        let tap = patch.tap_model(model, input)?;
-                        let slice = patch.wire_node(
-                            &*node.name,
-                            Slice { axis: self.axis, start: start - offset, end: end - offset },
-                            &[tap],
-                        )?[0];
-                        patch.shunt_outside(OutletId::new(node.id, 0), slice)?;
-                        return Ok(Some(patch));
-                    }
-                    offset += len;
-                }
+        let mut patch = TypedModelPatch::default();
+//        println!("declutter slice {}", node);
+        if let Some(wire) = prec.op().as_typed().unwrap().slice_output(
+            model,
+            prec,
+            &mut patch,
+            node.inputs[0].slot,
+            self.axis,
+            start,
+            end,
+        )? {
+            patch.shunt_outside(model, OutletId::new(node.id, 0), wire)?;
+//            dbg!(&patch);
+//            dbg!(&self);
+            if patch.model.nodes.len() == 2 && patch.model.node(1).op().same_as(self) {
+                return Ok(None);
             }
+            return Ok(Some(patch));
         }
         Ok(None)
     }
@@ -150,15 +161,38 @@ impl<D: DimLike + ToDim> TypedOp for Slice<D> {
             let take = (self.end.clone() - &self.start).to_dim();
             PulsedAxisSlice::new(self.axis, skip, take).into()
         } else {
-            objekt::clone_box(self)
+            dyn_clone::clone_box(self)
         };
         target.wire_node(&*node.name, op, &[input])
     }
 
-    typed_op_as_op!();
+    fn slice_output(
+        &self,
+        model: &TypedModel,
+        node: &TypedNode,
+        patch: &mut TypedModelPatch,
+        _output_slot: usize,
+        axis: usize,
+        start: usize,
+        end: usize,
+    ) -> TractResult<Option<OutletId>> {
+        let prec = model.node(node.inputs[0].node);
+        if axis != self.axis {
+            return prec
+                .op()
+                .as_typed()
+                .unwrap()
+                .slice_output(model, &prec, patch, node.inputs[0].slot, axis, start, end)?
+                .map(|w| Ok(patch.wire_node(&node.name, self.clone(), &[w])?[0]))
+                .transpose();
+        }
+        Ok(None)
+    }
+
+    as_op!();
 }
 
-impl<D: DimLike + ToDim> PulsedOp for Slice<D> {
+impl<D: DimLike + ToDim + Hash> PulsedOp for Slice<D> {
     fn pulsed_output_facts(&self, inputs: &[&PulsedFact]) -> TractResult<TVec<PulsedFact>> {
         let mut fact = inputs[0].clone();
         fact.delay += self.start.to_integer()? as usize;
@@ -166,16 +200,18 @@ impl<D: DimLike + ToDim> PulsedOp for Slice<D> {
         Ok(tvec!(fact))
     }
 
-    pulsed_op_as_op!();
+    as_op!();
     pulsed_op_to_typed_op!();
 }
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct PulsedAxisSlice {
     pub axis: usize,
     pub skip: usize,
     pub take: TDim,
 }
+
+tract_linalg::impl_dyn_hash!(PulsedAxisSlice);
 
 impl Op for PulsedAxisSlice {
     fn name(&self) -> Cow<str> {
@@ -208,5 +244,5 @@ impl PulsedOp for PulsedAxisSlice {
         Box::new(crate::ops::identity::Identity::default())
     }
 
-    pulsed_op_as_op!();
+    as_op!();
 }

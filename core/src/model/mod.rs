@@ -1,4 +1,3 @@
-//! B
 //! ## Models and their lifecycle
 //!
 //! In order to reason on the model and performs optimisations, a model needs
@@ -43,13 +42,16 @@
 use std::collections::HashMap;
 use std::str;
 
-pub(crate) mod compact;
-mod dsl;
+use itertools::Itertools;
+
+pub mod compact;
+pub mod dsl;
 mod fact;
 mod model;
 mod node;
 pub mod order;
 mod patch;
+pub mod translator;
 
 pub use self::dsl::*;
 pub use self::fact::*;
@@ -57,14 +59,19 @@ pub use self::model::*;
 pub use self::node::*;
 pub use self::order::eval_order;
 pub use self::patch::ModelPatch;
-pub use crate::analyser::types::InferenceFact;
-pub use crate::ops::{InferenceOp, Op, TypedOp};
+pub use crate::ops::{Op, TypedOp};
 
+use crate::model::translator::Translate;
+use crate::ops::invariants;
 use crate::plan::{SimplePlan, SimpleState};
 use crate::TractResult;
+use tract_linalg::hash::DynHash;
 
 /// Common methods for all variants of model.
-pub trait Model: downcast_rs::Downcast + std::fmt::Debug + objekt::Clone {
+pub trait Model: downcast_rs::Downcast + std::fmt::Debug + dyn_clone::DynClone {
+    /// Model label
+    fn model_label(&self) -> Option<&str>;
+
     /// Lookup node id by name
     fn node_id_by_name(&self, name: &str) -> TractResult<usize>;
 
@@ -80,14 +87,14 @@ pub trait Model: downcast_rs::Downcast + std::fmt::Debug + objekt::Clone {
     /// Number of outputs for a node, by id.
     fn node_output_count(&self, id: usize) -> usize;
 
-    /// Number of outputs for a node, by id.
-    fn node_control_inputs(&self, id: usize) -> &[usize];
-
     /// Number nodes
     fn nodes_len(&self) -> usize;
 
     /// Formatted node label
-    fn node_format(&self, id: usize) -> String;
+    fn node_display(&self, id: usize) -> String;
+
+    /// Formatted node label
+    fn node_debug(&self, id: usize) -> String;
 
     /// Eval order for the model
     fn eval_order(&self) -> TractResult<Vec<usize>>;
@@ -102,7 +109,7 @@ pub trait Model: downcast_rs::Downcast + std::fmt::Debug + objekt::Clone {
     fn output_outlets(&self) -> &[OutletId];
 
     /// Tensorfact for an outlet
-    fn outlet_tensorfact(&self, outlet: OutletId) -> InferenceFact;
+    fn outlet_typedfact(&self, outlet: OutletId) -> TractResult<TypedFact>;
 
     /// Short outlet formatter (id plus fact)
     fn outlet_fact_format(&self, outlet: OutletId) -> String;
@@ -115,50 +122,6 @@ pub trait Model: downcast_rs::Downcast + std::fmt::Debug + objekt::Clone {
 }
 
 impl_downcast!(Model);
-
-#[macro_export]
-macro_rules! dispatch_model {
-    ($model: expr, $expr: expr) => {
-        if let Some(m) = $model.downcast_ref::<InferenceModel>() {
-            $expr(m)
-        } else if let Some(m) = $model.downcast_ref::<TypedModel>() {
-            $expr(m)
-        } else if let Some(m) = $model.downcast_ref::<NormalizedModel>() {
-            $expr(m)
-        } else if let Some(m) = $model.downcast_ref::<PulsedModel>() {
-            $expr(m)
-        } else {
-            unreachable!()
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! dispatch_model_no_pulse {
-    ($model: expr, $expr: expr) => {
-        if let Some(m) = $model.downcast_ref::<InferenceModel>() {
-            $expr(m)
-        } else if let Some(m) = $model.downcast_ref::<TypedModel>() {
-            $expr(m)
-        } else if let Some(m) = $model.downcast_ref::<NormalizedModel>() {
-            $expr(m)
-        } else {
-            bail!("Pulse model are unsupported here")
-        }
-    };
-}
-
-/// A model with partially types and shapes, as produced by parsing ONNX or
-/// Tensorflow graphs.
-pub type InferenceModel = ModelImpl<InferenceFact, Box<dyn InferenceOp>>;
-/// Node for InferenceModel graph
-pub type InferenceNode = BaseNode<InferenceFact, Box<dyn InferenceOp>>;
-/// A ModelPatch for InferenceModel.
-pub type InferenceModelPatch = ModelPatch<InferenceFact, Box<dyn InferenceOp>>;
-/// An execution plan for InferenceModel.
-pub type InferenceSimplePlan<M> = SimplePlan<InferenceFact, Box<dyn InferenceOp>, M>;
-/// An execution state for InferenceModel.
-pub type InferenceSimpleState<M, P> = SimpleState<InferenceFact, Box<dyn InferenceOp>, M, P>;
 
 /// A model with completely determined types and shapes.
 pub type TypedModel = ModelImpl<TypedFact, Box<dyn TypedOp>>;
@@ -183,110 +146,38 @@ pub type NormalizedSimplePlan<M> = SimplePlan<NormalizedFact, Box<dyn TypedOp>, 
 /// An execution state for TypedModel.
 pub type NormalizedSimpleState<M, P> = SimpleState<NormalizedFact, Box<dyn TypedOp>, M, P>;
 
-impl InferenceModel {
-    /*
-    /// Analyse one node of the graph.
-    pub fn analyse_one(&mut self, id: usize) -> TractResult<bool> {
-        crate::analyser::Analyser::new(self).analyse_one(id)
-    }
-    */
-
-    /// Analyse all nodes of the graph.
-    ///
-    /// Will stop on first error unless `obstinate` is `true`.
-    pub fn analyse(&mut self, obstinate: bool) -> TractResult<bool> {
-        crate::analyser::Analyser::new(self).analyse_obstinate(obstinate)
-    }
-
-    /// Perform early transformation before going typed.
-    pub fn incorporate(self) -> TractResult<InferenceModel> {
-        let mut model = self;
-        loop {
-            let mut done_something = false;
-            for p in crate::optim::incorporate() {
-                done_something = done_something || p.pass(&mut model)?;
-                if cfg!(debug_assertions) {
-                    model.check_edges()?;
-                }
-            }
-            if !done_something {
-                break;
-            }
-        }
-        model = compact::compact(&model)?;
-        model.analyse(false)?;
-        Ok(model)
-    }
-
-    /// List OutletId with incomplete type information.
-    ///
-    /// Will stop on first error unless `obstinate` is `true`.
-    pub fn missing_type_shape(&self) -> TractResult<Vec<OutletId>> {
-        use crate::analyser::types::Factoid;
-        Ok(self
-            .eval_order()?
-            .iter()
-            .flat_map(|&node| {
-                self.nodes()[node]
-                    .outputs
-                    .iter()
-                    .enumerate()
-                    .map(move |(ix, outlet)| (OutletId::new(node, ix), outlet))
-            })
-            .filter(|(_, o)| !o.fact.datum_type.is_concrete() || !o.fact.shape.is_concrete())
-            .map(|(id, _)| id)
-            .collect())
-    }
-
-    /// Eliminate seemingly dead branches of the graph.
-    ///
-    /// This may break stateful networks.
-    pub fn eliminate_dead_branches(mut self) -> TractResult<InferenceModel> {
-        compact::compact(&mut self)
-    }
-
-    /// Attempt full analyse and conversion to TypedModel.
-    pub fn into_typed(mut self) -> TractResult<TypedModel> {
-        self.analyse(false)?;
-        let m = self.incorporate()?;
-        Ok(compact::translate(&m, &())?.0)
-    }
-
-    /// Attempt full analyse, decluttering and conversion to NormalizedModel.
-    pub fn into_normalized(self) -> TractResult<NormalizedModel> {
-        self.into_typed()?.declutter()?.into_normalized()
-    }
-
-    /// Attempt full analyse, decluttering and mapping to optimized operations.
-    ///
-    /// This will work even if the network can not be normalized.
-    pub fn into_optimized(self) -> TractResult<TypedModel> {
-        self.into_typed()?.into_optimized()
-    }
-}
-
 impl TypedModel {
+    pub fn signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Perform declutter pass on the network.
     pub fn declutter(self) -> TractResult<TypedModel> {
+        let started = self.signature();
         let mut model = self;
         let model_inputs = model.input_outlets()?.len();
         let model_outputs = model.output_outlets()?.len();
         loop {
             let mut done_something = false;
             for p in crate::optim::declutter() {
+                debug!("done_something {:?} before {:?}", done_something, p);
                 done_something = done_something || p.pass(&mut model)?;
+                debug!("done_something {:?} after {:?}", done_something, p);
                 if cfg!(debug_assertions) {
                     model.check_edges()?;
                     assert_eq!(model.input_outlets()?.len(), model_inputs);
                     assert_eq!(model.output_outlets()?.len(), model_outputs);
                 }
             }
-            if !done_something {
+            if !done_something || model.signature() == started {
                 break;
             }
             model = compact::compact(&model)?;
         }
-        Ok(model)
+        compact::compact(&model)
     }
 
     /// Translate the graph to optimized operators.
@@ -308,9 +199,13 @@ impl TypedModel {
         Ok(model)
     }
 
+    pub fn invariants(&self) -> TractResult<invariants::Invariants> {
+        invariants::for_model(self)
+    }
+
     /// Attempt to convert the network to a NormalizedModel.
     pub fn into_normalized(self) -> TractResult<NormalizedModel> {
-        compact::compact(&self)
+        crate::model::translator::IntoTranslator.translate_model(&self)
     }
 
     /// Declutter as much as possible, then translate to optimized operators.
@@ -327,7 +222,7 @@ impl NormalizedModel {
     ///
     /// Can not fail.
     pub fn into_typed(self) -> TractResult<TypedModel> {
-        compact::compact(&self)
+        translator::IntoTranslator.translate_model(&self)
     }
 }
 
@@ -338,7 +233,6 @@ mod test {
     #[test]
     fn test() {
         fn is_sync<T: Sync>() {}
-        is_sync::<InferenceModel>();
         is_sync::<TypedModel>();
         is_sync::<NormalizedModel>();
     }

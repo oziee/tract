@@ -2,28 +2,22 @@ use crate::model::*;
 use crate::TractResult;
 use std::fmt::Debug;
 
+pub mod change_axes;
 mod prop_const;
 mod push_split_down;
 
+use self::change_axes::ChangeAxes;
 use self::prop_const::PropConst;
 use self::push_split_down::PushSplitDown;
 
 use crate::errors::TractResultExt;
 
-pub trait IncorporatePass: Debug + Send + Sync {
-    fn pass(&self, model: &mut InferenceModel) -> TractResult<bool>;
-}
-
 pub trait TypedPass: Debug + Send + Sync {
     fn pass(&self, model: &mut TypedModel) -> TractResult<bool>;
 }
 
-pub fn incorporate() -> Vec<Box<dyn IncorporatePass>> {
-    vec![Box::new(IncorporateOps)]
-}
-
 pub fn declutter() -> Vec<Box<dyn TypedPass>> {
-    vec![Box::new(PropConst) as _, Box::new(DeclutterOps), Box::new(PushSplitDown)]
+    vec![Box::new(PropConst), Box::new(DeclutterOps), Box::new(PushSplitDown), Box::new(ChangeAxes)]
 }
 
 pub fn codegen() -> Vec<Box<dyn TypedPass>> {
@@ -31,76 +25,42 @@ pub fn codegen() -> Vec<Box<dyn TypedPass>> {
 }
 
 #[derive(Debug)]
-pub struct IncorporateOps;
-
-impl IncorporatePass for IncorporateOps {
-    fn pass(&self, model: &mut InferenceModel) -> TractResult<bool> {
-        let mut done_something = false;
-        loop {
-            let mut done_something_this_time = false;
-            for id in model.eval_order()? {
-                let reduced = {
-                    let node = &model.nodes()[id];
-                    debug!("Incorporate {}", node);
-                    node.op
-                        .incorporate(model, node)
-                        .chain_err(|| format!("{:?} node {}", self, node))?
-                };
-                if let Some(red) = reduced {
-                    {
-                        let node = &model.nodes()[id];
-                        debug!("Apply a model patch for {:?}: {}", self, node);
-                    }
-                    red.apply(model)?;
-                    if cfg!(debug_assertions) {
-                        model.check_edges()?;
-                    }
-                    done_something_this_time = true;
-                }
-            }
-            done_something = done_something || done_something_this_time;
-            if !done_something_this_time {
-                break;
-            }
-        }
-        Ok(done_something)
-    }
-}
-
-#[derive(Debug)]
 pub struct DeclutterOps;
 
 impl TypedPass for DeclutterOps {
     fn pass(&self, model: &mut TypedModel) -> TractResult<bool> {
-        let mut done_something = false;
+        let mut hashset = std::collections::HashSet::new();
+        let initial = model.signature();
+        hashset.insert(initial);
+
+        let mut new = model.clone();
         loop {
-            let mut done_something_this_time = false;
-            for id in model.eval_order()? {
+            for id in new.eval_order()? {
                 let reduced = {
-                    let node = &model.nodes()[id];
-                    debug!("Decluttering {}", node);
+                    let node = &new.nodes()[id];
                     node.op
-                        .declutter(model, node)
+                        .declutter(&new, node)
                         .chain_err(|| format!("{:?} node {}", self, node))?
                 };
                 if let Some(red) = reduced {
-                    {
-                        let node = &model.nodes()[id];
-                        debug!("Apply a model patch for {:?}: {}", self, node);
-                    }
-                    red.apply(model)?;
+                    debug!("Apply a model patch for {:?} {}", self, new.nodes()[id]);
+                    red.apply(&mut new)?;
                     if cfg!(debug_assertions) {
-                        model.check_edges()?;
+                        new.check_edges()?;
                     }
-                    done_something_this_time = true
                 }
             }
-            done_something = done_something || done_something_this_time;
-            if !done_something_this_time {
+
+            new = crate::model::compact::compact(&new)?;
+            let sig = new.signature();
+            if hashset.contains(&sig) {
                 break;
+            } else {
+                hashset.insert(sig);
             }
         }
-        Ok(done_something)
+        std::mem::swap(model, &mut new);
+        Ok(model.signature() != initial)
     }
 }
 
@@ -121,10 +81,7 @@ impl TypedPass for CodegenOps {
                         .chain_err(|| format!("{:?} node {}", self, node))?
                 };
                 if let Some(red) = reduced {
-                    {
-                        let node = &model.nodes()[id];
-                        debug!("Apply a model patch for {:?} {}", self, node);
-                    }
+                    debug!("Apply a model patch for {:?} {}", self, model.nodes()[id]);
                     red.apply(model)?;
                     if cfg!(debug_assertions) {
                         model.check_edges()?;
@@ -156,10 +113,7 @@ impl TypedPass for FuseOps {
                     node.op.fuse(model, node).chain_err(|| format!("{:?} node {}", self, node))?
                 };
                 if let Some(red) = reduced {
-                    {
-                        let node = &model.nodes()[id];
-                        debug!("Apply a model patch for {:?} {}", self, node);
-                    }
+                    debug!("Apply a model patch for {:?} {}", self, model.nodes()[id]);
                     red.apply(model)?;
                     if cfg!(debug_assertions) {
                         model.check_edges()?;

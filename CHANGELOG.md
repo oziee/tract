@@ -1,5 +1,35 @@
 ## Unreleased
 
+## 0.6.3 - 2020-04-25
+
+* Lock ndarray version to dodge rustc/llvm issue (https://github.com/rust-lang/rust/issues/71506)
+
+## 0.6.2 - 2020-04-15
+
+* Use http://gihub.com/kali/readings for instrumentation.
+
+## 0.6.0 - 2020-02-19
+
+### Notable
+
+* New jupyter/keras/tf example
+* ARMv8 tanh / sigmoid optimisation
+
+### API Breaking
+
+* refactor exports and dependencies
+    * preferred way to use tract is now to `use tract_tensorflow::prelude::*;`
+    * singleton framework is built by `let tensorflow = tensorflow()`. The Framework trait is in the prelude too.
+    * the prelude contains a reexport of `tract_core`, and of ndarray as `tract_ndarray`
+    * no more need to declare dependency on `tract-core` and/or `tract-linalg` in Cargo.toml
+    * same goes for `tract_onnx`
+
+## 0.5.9 - 2020-02-07
+
+### Breaking
+
+* Rustc minimum version is now 1.39
+
 ### Onnx
 
 * Support for MatMulInteger, ConvInteger

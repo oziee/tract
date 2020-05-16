@@ -1,9 +1,8 @@
 use crate::model::ParsingContext;
 use crate::pb::*;
-use tract_core::internal::*;
-use tract_core::ndarray;
-use tract_core::ndarray::*;
-use tract_core::ops as core_ops;
+use tract_hir::internal::*;
+use tract_hir::ops;
+use tract_ndarray::prelude::*;
 
 pub fn rnn(
     _ctx: &ParsingContext,
@@ -23,7 +22,7 @@ pub fn rnn(
     Ok((Box::new(rnn), vec![]))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct RNN {
     pub optional_bias_input: Option<usize>,
     pub optional_sequence_lens_input: Option<usize>,
@@ -34,6 +33,8 @@ pub struct RNN {
     pub back: Box<dyn TypedOp>,
 }
 
+tract_linalg::impl_dyn_hash!(RNN);
+
 impl Default for RNN {
     fn default() -> RNN {
         RNN {
@@ -42,8 +43,8 @@ impl Default for RNN {
             optional_initial_h_input: None,
             optional_y_output: None,
             optional_y_h_output: None,
-            fore: Box::new(core_ops::math::tanh()),
-            back: Box::new(core_ops::math::tanh()),
+            fore: Box::new(ops::math::tanh()),
+            back: Box::new(ops::math::tanh()),
         }
     }
 }
@@ -123,7 +124,7 @@ impl InferenceRulesOp for RNN {
         Ok(self.optional_y_output.is_some() as usize + self.optional_y_h_output.is_some() as usize)
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     #[allow(non_snake_case)]
     fn to_typed(
@@ -133,7 +134,7 @@ impl InferenceRulesOp for RNN {
         target: &mut TypedModel,
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
-        use tract_core::ops::{array, math, scan};
+        use ops::{array, math, matmul, scan};
 
         let x_fact = target.outlet_fact(mapping[&node.inputs[0]])?.clone();
         let r_fact = target.outlet_fact(mapping[&node.inputs[2]])?;
@@ -172,28 +173,25 @@ impl InferenceRulesOp for RNN {
         let mut x_source_fact = x_fact.clone();
         x_source_fact.shape.set_dim(0, 1.to_dim())?;
         let x_source = body.add_source("x_source", x_source_fact)?.into();
-        wire!(Xt = array::RmDims::new(vec![0]), x_source);
+        wire!(Xt = AxisOp::Rm(0), x_source);
 
         // W: onnx interface: [num_directions, 3*hidden_size, input_size]
         // scan interfaces: [3*hidden_size, input_size]
-        target_wire!(w = tract_core::ops::array::RmDims::new(vec![0]), mapping[&node.inputs[1]]);
+        target_wire!(w = AxisOp::Rm(0), mapping[&node.inputs[1]]);
         outer_inputs.push(w);
         input_mapping.push(scan::InputMapping::Full { slot: 1 });
         let W = body.add_source("w", target.outlet_fact(w)?.clone())?.into();
 
         // R: onnx interface: [num_directions, 3*hidden_size, hidden_size]
         // scan interfaces: [3*hidden_size, hidden_size]
-        target_wire!(r = tract_core::ops::array::RmDims::new(vec![0]), mapping[&node.inputs[2]]);
+        target_wire!(r = AxisOp::Rm(0), mapping[&node.inputs[2]]);
         outer_inputs.push(r);
         input_mapping.push(scan::InputMapping::Full { slot: 2 });
         let R = body.add_source("r", target.outlet_fact(r)?.clone())?.into();
 
         // B: onnx interface: [num_directions, 6*hidden_size]
         let b = if let Some(slot) = self.optional_bias_input {
-            target_wire!(
-                b = tract_core::ops::array::RmDims::new(vec![0]),
-                mapping[&node.inputs[slot]]
-            );
+            target_wire!(b = AxisOp::Rm(0), mapping[&node.inputs[slot]]);
             outer_inputs.push(b);
             input_mapping.push(scan::InputMapping::Full { slot });
             let b = body.add_source("b", target.outlet_fact(b)?.clone())?.into();
@@ -211,16 +209,13 @@ impl InferenceRulesOp for RNN {
         // scan inner: [chunk=1, batch_size, hidden_size]
         // onnx inner: [batch_size, hidden_size]
         let initializer = if let Some(initial_h_input) = self.optional_initial_h_input {
-            target_wire!(
-                h = tract_core::ops::array::RmDims::new(vec![0]),
-                mapping[&node.inputs[initial_h_input]]
-            );
-            target_wire!(h_chunk = tract_core::ops::array::AddDims::new(vec![0]), h);
+            target_wire!(h = AxisOp::Rm(0), mapping[&node.inputs[initial_h_input]]);
+            target_wire!(h_chunk = AxisOp::Add(0), h);
             outer_inputs.push(h_chunk);
             scan::StateInitializer::FromInput(initial_h_input)
         } else {
             scan::StateInitializer::Value(
-                ndarray::Array3::<f32>::zeros((1, b_size, h_size)).into_arc_tensor(),
+                tract_ndarray::Array3::<f32>::zeros((1, b_size, h_size)).into_arc_tensor(),
             )
         };
         input_mapping.push(scan::InputMapping::State { initializer });
@@ -231,30 +226,30 @@ impl InferenceRulesOp for RNN {
             )?
             .into();
 
-        wire!(Ht_1 = array::RmDims::new(vec!(0)), h_source);
+        wire!(Ht_1 = AxisOp::Rm(0), h_source);
 
         let bias = if let Some(b) = b {
             wire!(Wbi = array::Slice::new(0, 0 * h_size, 1 * h_size), b);
             wire!(Rbi = array::Slice::new(0, 1 * h_size, 2 * h_size), b);
-            wire!(bi = math::add::bin(), Wbi, Rbi);
+            wire!(bi = math::add::bin_typed(), Wbi, Rbi);
             Some(bi)
         } else {
             None
         };
 
         // Ht = f(Xt*(Wi^T) + Ht-1*(Ri^T) + Wbi + Rbi)
-        wire!(Xt_WiT = math::MatMul::default().with_b_trans(true), Xt, W);
-        wire!(Ht_1_RiT = math::MatMul::default().with_b_trans(true), Ht_1, R);
+        wire!(Xt_WiT = matmul::MatMul::default().with_b_trans(true), Xt, W);
+        wire!(Ht_1_RiT = matmul::MatMul::default().with_b_trans(true), Ht_1, R);
 
-        wire!(ht0 = math::add::bin(), Xt_WiT, Ht_1_RiT);
+        wire!(ht0 = math::add::bin_typed(), Xt_WiT, Ht_1_RiT);
         let mut ht0 = ht0;
         if let Some(bias) = bias {
-            wire!(ht_bias = math::add::bin(), ht0, bias);
+            wire!(ht_bias = math::add::bin_typed(), ht0, bias);
             ht0 = ht_bias;
         }
         wire!(Ht = self.fore.clone(), ht0);
 
-        wire!(y_h = array::AddDims::new(vec!(0)), Ht);
+        wire!(y_h = AxisOp::Add(0), Ht);
         body.set_output_outlets(&[y_h])?;
 
         let output_mapping = scan::OutputMapping {
@@ -268,7 +263,7 @@ impl InferenceRulesOp for RNN {
 
         let scan_outputs = target.wire_node(
             &*node.name,
-            scan::Typed::new(
+            scan::TypedScan::new(
                 body,
                 input_mapping,
                 vec![output_mapping],
@@ -279,7 +274,7 @@ impl InferenceRulesOp for RNN {
 
         let mut result = tvec!();
         if let Some(slot) = self.optional_y_output {
-            target_wire!(y = array::AddDims::new(vec!(0)), scan_outputs[slot]);
+            target_wire!(y = AxisOp::Add(0), scan_outputs[slot]);
             result.push(y);
         }
         if let Some(slot) = self.optional_y_h_output {

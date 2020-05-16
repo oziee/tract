@@ -2,7 +2,7 @@
 
 CRATE=$1
 VERSION=$2
-CRATES="linalg core tensorflow onnx kaldi cli"
+CRATES="linalg core hir tensorflow onnx kaldi cli"
 
 if [ `uname` = "Darwin" ]
 then
@@ -47,7 +47,7 @@ done
 
 set_version $CRATE/Cargo.toml $VERSION
 git diff
-git commit . -m "release $CRATE/$VERSION"
+git commit --allow-empty . -m "release $CRATE/$VERSION"
 (cd $CRATE ; cargo publish)
 
 git tag -f "$CRATE/$VERSION"

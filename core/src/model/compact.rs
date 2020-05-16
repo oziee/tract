@@ -1,126 +1,86 @@
-use crate::model::{Fact, InletId, ModelImpl, OutletId};
-use crate::ops::Translate;
-use crate::prelude::*;
+use crate::model::{Fact, ModelImpl, OutletId};
+use crate::internal::*;
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::fmt::{Debug, Display};
+use std::fmt;
 
-pub(crate) fn translate<TI1, TI2, O1, O2, Ctx>(
-    source: &ModelImpl<TI1, O1>,
-    ctx: &Ctx,
-) -> TractResult<(ModelImpl<TI2, O2>, HashMap<OutletId, OutletId>)>
+trait GraphRewriter<F, O>
 where
-    TI1: Fact + Clone + 'static,
-    TI2: Fact + Clone + 'static,
-    O1: Display
-        + Debug
-        + AsRef<dyn Op>
-        + AsMut<dyn Op>
-        + Clone
-        + 'static
-        + Translate<TI1, O1, TI2, O2, Ctx>,
-    O2: Display + Debug + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static,
+    F: Fact + Clone + 'static + Hash,
+    O: fmt::Display + fmt::Debug + Clone + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static + Hash,
 {
-    let mut target = ModelImpl::default();
-    let mut mapping = HashMap::new();
-    for old_id in source.eval_order()? {
-        let node = source.node(old_id);
-        debug!("Translating {}", node);
-        let outlets = node
-            .op
-            .translate(&source, node, &mut target, &mapping, ctx)
-            .chain_err(|| format!("Translating {}", node))?;
-        for (ix, outlet) in outlets.into_iter().enumerate() {
-            mapping.insert(OutletId::new(node.id, ix), outlet);
-            if let Some(label) = source.outlet_label(OutletId::new(node.id, ix)) {
-                target.set_outlet_label(outlet, label.to_string());
+    fn wire_node(
+        &self,
+        old: &ModelImpl<F, O>,
+        new: &mut ModelImpl<F, O>,
+        map: &HashMap<OutletId, OutletId>,
+        node: &BaseNode<F, O>,
+    ) -> TractResult<TVec<OutletId>>;
+
+    fn rewrite_model(&self, old: &ModelImpl<F, O>) -> TractResult<ModelImpl<F, O>> {
+        let mut new = ModelImpl::default();
+        let mut map = HashMap::new();
+        for old_id in old.eval_order()? {
+            let old_node = old.node(old_id);
+            let outlets = self.wire_node(old, &mut new, &map, old_node)?;
+            for (ix, &o) in outlets.iter().enumerate() {
+                map.insert(OutletId::new(old_id, ix), o);
+                if let Some(label) = old.outlet_label(OutletId::new(old_id, ix)) {
+                    new.set_outlet_label(o, label.to_string());
+                }
             }
-            /* This is only valid between analyse and typed, but may be useful
-             * for debugging
-            #[cfg(debug_assertions)]
-            {
-                use crate::analyser::types::Fact;
-                node.outputs[ix]
-                    .fact
-                    .to_tensor_fact()
-                    .unify(&target.outlet_fact(outlet)?.to_tensor_fact())
-                    .chain_err(|| format!("Translating {}", node))?;
+            if old.input_outlets()?.contains(&OutletId::new(old_node.id, 0)) {
+                continue;
             }
-            */
         }
-    }
-    // do not drop inputs, even if they are useless, to maintain interface
-    for i in source.input_outlets()? {
-        if !mapping.contains_key(i) {
-            let node = source.node(i.node);
-            debug!("Translate useless source {}", node);
-            let outlets = node
-                .op
-                .translate(&source, node, &mut target, &mapping, ctx)
-                .chain_err(|| format!("Translating {}", node))?;
-            mapping.insert(*i, outlets[0]);
+        for i in old.input_outlets()? {
+            if !map.contains_key(&i) {
+                let node = old.node(i.node);
+                debug!("Translate useless source {}", node);
+                let new_id = new.add_node(
+                    &*node.name,
+                    node.op.clone(),
+                    tvec!(node.outputs[0].fact.clone()),
+                )?;
+                map.insert(*i, new_id.into());
+            }
         }
+        // maintaining order of i/o interface
+        new.inputs = old.input_outlets()?.iter().map(|i| map[&i]).collect();
+        new.outputs = old.output_outlets()?.iter().map(|o| map[&o]).collect();
+        Ok(new)
     }
-    // maintaining order of i/o interface
-    target.inputs = source.input_outlets()?.iter().map(|i| mapping[&i]).collect();
-    target.outputs = source.output_outlets()?.iter().map(|o| mapping[&o]).collect();
-    Ok((target, mapping))
 }
 
-pub(crate) fn compact<TI1, TI2, O1, O2, E1, E2>(
-    old: &ModelImpl<TI1, O1>,
-) -> TractResult<ModelImpl<TI2, O2>>
+struct NoopRewriter;
+impl<F, O> GraphRewriter<F, O> for NoopRewriter
 where
-    TractError: From<E1> + From<E2>,
-    TI1: Fact + Clone + 'static,
-    TI2: Fact + TryFrom<TI1, Error = E1> + Clone + 'static,
-    O1: Display + Debug + Clone + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static,
-    O2: Display + TryFrom<O1, Error = E2> + Debug + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static,
+    F: Fact + Clone + 'static + Hash,
+    O: fmt::Display + fmt::Debug + Clone + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static + Hash,
+    ModelImpl<F, O>: ModelWireNode<F, O> + ModelSpecialOps<F, O>,
 {
-    let mut model = ModelImpl::default();
-    let mut map = HashMap::new();
-    for old_id in old.eval_order()? {
-        let old_node = &old.nodes()[old_id];
-        let facts = old_node
-            .outputs
-            .iter()
-            .map(|of| Ok(TI2::try_from(of.fact.clone())?))
-            .collect::<TractResult<TVec<_>>>()
-            .map_err(|e| format!("While translating {}: {:?}", old_node, e))?;
-        let new_op = O2::try_from(old_node.op.clone())?;
-        let new_id = model.add_node(old_node.name.clone(), new_op, facts)?;
-        map.insert(old_id, new_id);
-        for ix in 0..old_node.outputs.len() {
-            if let Some(label) = old.outlet_label(OutletId::new(old_id, ix)) {
-                model.set_outlet_label(OutletId::new(new_id, ix), label.to_string());
-            }
+    fn wire_node(
+        &self,
+        old: &ModelImpl<F, O>,
+        new: &mut ModelImpl<F, O>,
+        map: &HashMap<OutletId, OutletId>,
+        node: &BaseNode<F, O>,
+    ) -> TractResult<TVec<OutletId>> {
+        let inputs = node.inputs.iter().map(|o| map[o]).collect::<TVec<_>>();
+        let outlets = new
+            .wire_node(&*node.name, node.op.clone(), &inputs)
+            .chain_err(|| format!("Compacting model, {}", node))?;
+        for (ix, &o) in outlets.iter().enumerate() {
+            new.set_outlet_fact(o, old.outlet_fact(OutletId::new(node.id, ix))?.clone())?;
         }
-        if old.input_outlets()?.contains(&OutletId::new(old_node.id, 0)) {
-            continue;
-        }
-        for (ix, input) in old_node.inputs.iter().enumerate() {
-            model
-                .add_edge(OutletId::new(map[&input.node], input.slot), InletId::new(new_id, ix))?;
-        }
-        for input in old_node.control_inputs.iter() {
-            model.node_mut(new_id).control_inputs.push(map[input]);
-        }
+        Ok(outlets)
     }
-    for i in old.input_outlets()? {
-        if !map.contains_key(&i.node) {
-            let node = old.node(i.node);
-            debug!("Translate useless source {}", node);
-            let new_id = model.add_node(
-                &*node.name,
-                O2::try_from(node.op.clone())?,
-                tvec!(TI2::try_from(node.outputs[0].fact.clone())?),
-            )?;
-            map.insert(i.node, new_id);
-        }
-    }
-    // maintaining order of i/o interface
-    model.inputs = old.input_outlets()?.iter().map(|i| OutletId::new(map[&i.node], 0)).collect();
-    model.outputs =
-        old.output_outlets()?.iter().map(|o| OutletId::new(map[&o.node], o.slot)).collect();
-    Ok(model)
+}
+
+pub fn compact<F, O>(old: &ModelImpl<F, O>) -> TractResult<ModelImpl<F, O>>
+where
+    F: Fact + Clone + 'static + Hash,
+    O: fmt::Display + fmt::Debug + Clone + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static + Hash,
+    ModelImpl<F, O>: ModelWireNode<F, O> + ModelSpecialOps<F, O>,
+{
+    NoopRewriter.rewrite_model(old)
 }

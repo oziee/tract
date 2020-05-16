@@ -1,16 +1,18 @@
-use tract_core::internal::*;
-use tract_core::ops::nn;
+use tract_hir::internal::*;
+use tract_hir::ops::nn;
 
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct Reduce {
     t: DatumType,
     t_idx: DatumType,
     keep_dims: bool,
     reducer: nn::Reducer,
 }
+
+tract_linalg::impl_dyn_hash!(Reduce);
 
 pub fn max(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     reduce(pb, nn::Reducer::Max)
@@ -130,5 +132,5 @@ impl InferenceRulesOp for Reduce {
         }
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

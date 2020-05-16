@@ -1,8 +1,8 @@
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use tract_core::internal::*;
-use tract_core::ops::cnn::*;
-use tract_core::ops::nn::*;
+use tract_hir::internal::*;
+use tract_hir::ops::cnn::*;
+use tract_hir::ops::nn::*;
 
 pub fn depthwise_conv2d(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     let data_format = super::data_format(pb)?;
@@ -15,7 +15,7 @@ pub fn depthwise_conv2d(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<
     Ok(Box::new(DepthwiseConv2d::new(data_format, padding, strides, dilations)))
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct DepthwiseConv2d {
     data_format: DataFormat,
     padding: PaddingSpec,
@@ -23,9 +23,11 @@ pub struct DepthwiseConv2d {
     dilations: TVec<usize>,
 }
 
+tract_linalg::impl_dyn_hash!(DepthwiseConv2d);
+
 impl DepthwiseConv2d {
     fn to_core(&self, input_shape: &[TDim], kernel_shape: &[usize]) -> TractResult<Conv> {
-        let shape = self.data_format.shape(&input_shape);
+        let shape = self.data_format.shape(&input_shape)?;
         let mut conv = Conv::default()
             .hwio()
             .group(kernel_shape[2])
@@ -44,7 +46,7 @@ impl Op for DepthwiseConv2d {
         "tf.DepthwiseConv2dNative".into()
     }
 
-    not_a_typed_op!(); // FIXME translate to core as to_fixed instead of declutter, get rid of typed op impl
+    not_a_typed_op!();
 }
 
 impl StatelessOp for DepthwiseConv2d {
@@ -70,9 +72,9 @@ impl InferenceRulesOp for DepthwiseConv2d {
         s.equals(&inputs[0].datum_type, &outputs[0].datum_type)?;
         s.equals(&outputs[0].rank, 4)?;
         s.given_2(&inputs[0].shape, &inputs[1].shape, move |s, img, ker| {
-            let img = self.data_format.shape(img);
+            let img = self.data_format.shape(img)?;
             s.equals(&inputs[1].shape[2], &inputs[0].shape[img.c_axis()])?;
-            s.equals(&outputs[0].shape[img.n_axis()], img.n_dim())?;
+            s.equals(&outputs[0].shape[img.n_axis().unwrap()], img.n_dim().unwrap())?;
             if ker.iter().all(|d| d.to_integer().is_ok()) {
                 let ker: TVec<usize> =
                     ker.iter().map(|d| d.to_integer().unwrap() as usize).collect();
@@ -93,7 +95,7 @@ impl InferenceRulesOp for DepthwiseConv2d {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -110,7 +112,10 @@ impl InferenceRulesOp for DepthwiseConv2d {
         } else {
             bail!("Do not expect streaming on kernel dims");
         };
-        let conv = self.to_core(&*input_shape, kernel_shape)?;
+        let conv = self
+            .to_core(&*input_shape, kernel_shape)?
+            .to_unary(&[input, kernel])?
+            .ok_or("Failed to translate")?;
         target.wire_node(
             &*node.name,
             conv,

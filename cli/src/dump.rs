@@ -1,9 +1,9 @@
 use crate::display_graph::*;
 use crate::errors::*;
 use crate::{Model, Parameters};
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
-pub fn handle(params: Parameters, options: DisplayOptions, _inner: Vec<String>) -> CliResult<()> {
+pub fn handle(params: &Parameters, options: DisplayOptions, _inner: Vec<String>) -> CliResult<()> {
     let tract = &params.tract_model;
     handle_model(&**tract, &params, options)
 }
@@ -19,8 +19,11 @@ pub fn handle_model(
 
     if let Some(asserts) = &params.assertions {
         if let Some(asserts) = &asserts.assert_output_facts {
-            let outputs_facts: Vec<InferenceFact> =
-                model.output_outlets().iter().map(|o| model.outlet_tensorfact(*o)).collect();
+            let outputs_facts: Vec<InferenceFact> = model
+                .output_outlets()
+                .iter()
+                .map(|o| Ok(InferenceFact::from(&model.outlet_typedfact(*o)?)))
+                .collect::<TractResult<Vec<InferenceFact>>>()?;
             crate::utils::check_inferred(&*outputs_facts, &*asserts)?;
         }
     }

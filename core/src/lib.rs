@@ -10,12 +10,13 @@
 //! use tract_core::internal::*;
 //!
 //! // build a simple model that just add 3 to each input component
-//! let mut model = InferenceModel::default();
+//! let mut model = TypedModel::default();
 //!
-//! let input = model.add_source("input", InferenceFact::default()).unwrap();
+//! let input_fact = TypedFact::dt_shape(f32::datum_type(), [3].as_ref()).unwrap();
+//! let input = model.add_source("input", input_fact).unwrap();
 //! let three = model.add_const("three".to_string(), tensor0(3f32)).unwrap();
 //! let add = model.wire_node("add".to_string(),
-//!     tract_core::ops::math::add::bin(),
+//!     tract_core::ops::math::add::bin_typed(),
 //!     [input, three].as_ref()
 //!     ).unwrap();
 //!
@@ -45,12 +46,14 @@ extern crate bit_set;
 #[macro_use]
 extern crate derive_new;
 #[macro_use]
-extern crate downcast_rs;
+pub extern crate downcast_rs;
+#[macro_use]
+extern crate educe;
 #[macro_use]
 pub extern crate error_chain;
 #[allow(unused_imports)]
 #[macro_use]
-extern crate itertools;
+pub extern crate itertools;
 #[allow(unused_imports)]
 #[macro_use]
 extern crate log;
@@ -58,11 +61,9 @@ extern crate log;
 #[macro_use]
 pub extern crate ndarray;
 extern crate num_integer;
-extern crate num_traits;
+pub extern crate num_traits;
 #[macro_use]
 extern crate maplit;
-#[macro_use]
-pub extern crate objekt;
 #[cfg(test)]
 extern crate env_logger;
 #[cfg(test)]
@@ -74,12 +75,10 @@ extern crate smallvec;
 #[macro_use]
 extern crate serde_derive;
 
-extern crate tract_linalg;
+pub extern crate tract_linalg;
 
 #[macro_use]
 pub mod macros;
-#[macro_use]
-pub mod analyser;
 #[macro_use]
 pub mod ops;
 
@@ -87,7 +86,7 @@ pub mod broadcast;
 pub mod datum;
 pub mod dim;
 pub mod errors;
-pub mod framework;
+mod hash;
 pub mod model;
 mod optim;
 pub mod plan;
@@ -95,44 +94,52 @@ pub mod pulse;
 pub mod tensor;
 
 pub use crate::errors::*;
+pub use dyn_clone;
 
 /// This prelude is meant for code using tract.
 pub mod prelude {
-    pub use crate::analyser::types::InferenceFact;
     pub use crate::datum::{Blob, Datum, DatumType};
     pub use crate::dim::TDim;
     pub use crate::errors::*;
-    pub use crate::framework::Framework;
     pub use crate::model::*;
     pub use crate::plan::{SimplePlan, SimpleState};
     pub use crate::tensor::litteral::*;
     pub use crate::tensor::{IntoArcTensor, IntoTensor, Tensor};
     pub use crate::tvec;
     pub use std::sync::Arc;
+
+    pub use ndarray as tract_ndarray;
+    pub use num_traits as tract_num_traits;
+    pub use itertools as tract_itertools;
+    pub use tract_linalg;
 }
 
 /// This prelude is meant for code extending tract (like implementing new ops).
 pub mod internal {
-    pub use crate::analyser::rules::expr::{IntoExp, ToDimExp};
-    pub use crate::analyser::rules::{InferenceResult, InferenceRulesOp, Solver, TensorProxy};
-    pub use crate::analyser::types::TypeFact;
-    pub use crate::analyser::types::*;
-    pub use crate::dim::{DimLike, TDim, ToDim};
-    pub use crate::framework::*;
+    pub use crate::dim::{DimLike, TDim, ToDim, MaybeProduct};
+    pub use tract_linalg::hash::{ hash_f32, DynHash };
     pub use crate::model::*;
+    pub use crate::ops::change_axes::*;
     pub use crate::ops::element_wise::ElementWiseMiniOp;
+    pub use crate::ops::invariants::*;
     pub use crate::ops::{
-        check_input_arity, check_output_arity, Invariants, AxisInfo, Cost, InferenceOp, Op, OpState,
-        PulsedOp, StatefullOp, StatelessOp, Validation,
+        AxisInfo, Cost, Invariants, Op, OpState, PulsedOp, StatefullOp, StatelessOp, Validation,
     };
     pub use crate::plan::SessionState;
     pub use crate::prelude::*;
     pub use crate::pulse::{PulsedFact, PulsedModel, PulsedNode};
-    pub use crate::{args_1, args_2, args_3, args_4};
+    pub use downcast_rs as tract_downcast_rs;
+    pub use error_chain::bail;
     pub use std::borrow::Cow;
     pub use std::collections::HashMap;
+    pub use std::hash::Hash;
     pub use std::marker::PhantomData;
     pub use tract_linalg::f16::f16;
+    pub use tvec;
+    pub use {args_1, args_2, args_3, args_4, args_5, args_6, args_7, args_8};
+    pub use {as_op, not_a_pulsed_op, not_a_typed_op, op_as_typed_op, pulsed_op_to_typed_op};
+    pub use {bin_to_super_type, element_wise, element_wise_oop};
+    pub use {dispatch_copy, dispatch_datum, dispatch_datum_by_size, dispatch_floatlike, dispatch_numbers};
 }
 
 #[cfg(test)]

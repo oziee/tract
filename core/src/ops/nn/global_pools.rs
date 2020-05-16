@@ -1,7 +1,7 @@
 use crate::internal::*;
 use ndarray::prelude::*;
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct GlobalAvgPool {
     //    data_is_nhwc: bool, // default is nchw (onnx)
 }
@@ -18,16 +18,19 @@ impl GlobalAvgPool {
         for dim in final_shape[2..].iter_mut() {
             *dim = 1;
         }
-        let divisor = array.len() / (n * c);
+        let divisor_int = array.len() / (n * c);
+        let divisor = D::from(divisor_int).unwrap().recip();
         let result: Tensor = array
-            .into_shape(((n * c), divisor))?
+            .into_shape(((n * c), divisor_int))?
             .sum_axis(Axis(1))
-            .map(|x| *x / D::from_usize(divisor).unwrap())
+            .map(|x| *x * divisor)
             .into_shape(final_shape)?
             .into();
         Ok(tvec!(result.into()))
     }
 }
+
+tract_linalg::impl_dyn_hash!(GlobalAvgPool);
 
 impl Op for GlobalAvgPool {
     fn name(&self) -> Cow<str> {
@@ -47,32 +50,20 @@ impl StatelessOp for GlobalAvgPool {
     }
 }
 
-impl InferenceRulesOp for GlobalAvgPool {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        solver: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        rules(solver, inputs, outputs)
-    }
-
-    inference_op_as_op!();
-    to_typed!();
-}
-
 impl TypedOp for GlobalAvgPool {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         output_facts(inputs)
     }
 }
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct GlobalLpPool {
     p: usize, //    data_is_nhwc: bool, // default is nchw (onnx)
 }
+
+tract_linalg::impl_dyn_hash!(GlobalLpPool);
 
 impl GlobalLpPool {
     fn eval_t<D: Datum + ::num_traits::Float>(
@@ -88,15 +79,15 @@ impl GlobalLpPool {
         }
         let divisor = array.len() / (n * c);
         let input = array.into_shape(((n * c), divisor))?;
-        let divisor = D::from(divisor).unwrap();
+        let divisor = D::from(divisor).unwrap().recip();
         let result = if self.p == 1 {
-            input.fold_axis(Axis(1), D::zero(), |&a, &b| a + b.abs()).map(|a| *a / divisor)
+            input.fold_axis(Axis(1), D::zero(), |&a, &b| a + b.abs()).map(|a| *a * divisor)
         } else if self.p == 2 {
-            input.fold_axis(Axis(1), D::zero(), |&a, &b| a + b * b).map(|a| a.sqrt() / divisor)
+            input.fold_axis(Axis(1), D::zero(), |&a, &b| a + b * b).map(|a| a.sqrt() * divisor)
         } else {
             input
                 .fold_axis(Axis(1), D::zero(), |&a, &b| a + b.abs().powi(self.p as i32))
-                .map(|a| a.powf(D::from(self.p).unwrap().recip()) / divisor)
+                .map(|a| a.powf(D::from(self.p).unwrap().recip()) * divisor)
         };
         Ok(tvec!(result.into_shape(final_shape)?.into_arc_tensor()))
     }
@@ -119,33 +110,20 @@ impl StatelessOp for GlobalLpPool {
         dispatch_floatlike!(Self::eval_t(input.datum_type())(self, input))
     }
 }
-
-impl InferenceRulesOp for GlobalLpPool {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        solver: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        rules(solver, inputs, outputs)
-    }
-
-    inference_op_as_op!();
-    to_typed!();
-}
-
 impl TypedOp for GlobalLpPool {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         output_facts(inputs)
     }
 }
 
-#[derive(Debug, Clone, new, Default)]
+#[derive(Debug, Clone, new, Default, Hash)]
 pub struct GlobalMaxPool {
     //    data_is_nhwc: bool, // default is nchw (onnx)
 }
+
+tract_linalg::impl_dyn_hash!(GlobalMaxPool);
 
 impl GlobalMaxPool {
     fn eval_t<D: Datum + ::num_traits::Float>(
@@ -184,45 +162,12 @@ impl StatelessOp for GlobalMaxPool {
     }
 }
 
-impl InferenceRulesOp for GlobalMaxPool {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        solver: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        rules(solver, inputs, outputs)
-    }
-
-    inference_op_as_op!();
-    to_typed!();
-}
-
 impl TypedOp for GlobalMaxPool {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         output_facts(inputs)
     }
-}
-
-fn rules<'r, 'p: 'r, 's: 'r>(
-    s: &mut Solver<'r>,
-    inputs: &'p [TensorProxy],
-    outputs: &'p [TensorProxy],
-) -> InferenceResult {
-    check_input_arity(&inputs, 1)?;
-    check_output_arity(&outputs, 1)?;
-    s.equals(&outputs[0].datum_type, &inputs[0].datum_type)?;
-    s.equals(&outputs[0].rank, &inputs[0].rank)?;
-    s.equals(&outputs[0].shape[0], &inputs[0].shape[0])?;
-    s.equals(&outputs[0].shape[1], &inputs[0].shape[1])?;
-    s.given(&inputs[0].rank, move |s, rank| {
-        for i in 2..rank {
-            s.equals(&outputs[0].shape[i as usize], TDim::from(1))?;
-        }
-        Ok(())
-    })
 }
 
 fn output_facts(inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {

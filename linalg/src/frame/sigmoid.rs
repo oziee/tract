@@ -11,14 +11,14 @@ impl SigmoidFunc for f32 {
     }
 }
 
-pub trait Sigmoid<T>: Send + Sync + Debug + objekt::Clone
+pub trait Sigmoid<T>: Send + Sync + Debug + dyn_clone::DynClone
 where
     T: Copy + Debug + PartialEq + Send + Sync + SigmoidFunc,
 {
     fn run(&self, vec: &mut [T]);
 }
 
-clone_trait_object!(<T> Sigmoid<T> where T: Copy);
+dyn_clone::clone_trait_object!(<T> Sigmoid<T> where T: Copy);
 
 #[derive(Debug, Clone, new)]
 pub struct SigmoidImpl<K, T>
@@ -56,7 +56,7 @@ where
     }
 }
 
-pub trait SigmoidKer<T>: Send + Sync + Debug + objekt::Clone + Clone
+pub trait SigmoidKer<T>: Send + Sync + Debug + dyn_clone::DynClone + Clone
 where
     T: Copy + Debug + PartialEq + Send + Sync,
 {
@@ -119,6 +119,6 @@ pub mod test {
         let mut found = values.to_vec();
         op.run(&mut found);
         let expected = values.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect::<Vec<_>>();
-        crate::check_close(&*found, &*expected)
+        crate::test::check_close(&*found, &*expected)
     }
 }

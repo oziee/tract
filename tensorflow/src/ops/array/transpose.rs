@@ -1,12 +1,15 @@
+use tract_hir::internal::*;
+
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
-use tract_core::internal::*;
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct Transpose {
     t: DatumType,
     t_perm: DatumType,
 }
+
+tract_linalg::impl_dyn_hash!(Transpose);
 
 pub fn transpose(_ctx: &ParsingContext, pb: &NodeDef) -> TractResult<Box<dyn InferenceOp>> {
     let t = pb.get_attr_datum_type("T")?;
@@ -71,7 +74,7 @@ impl InferenceRulesOp for Transpose {
         })
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -81,10 +84,10 @@ impl InferenceRulesOp for Transpose {
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
         if let Some(ref axes) = target.outlet_fact(mapping[&node.inputs[1]])?.konst {
-            let axes: Vec<usize> =
+            let axes: TVec<usize> =
                 axes.cast_to::<i32>()?.as_slice::<i32>()?.iter().map(|&ax| ax as usize).collect();
-            let op = tract_core::ops::array::PermuteAxes::new(Some(axes));
-            target.wire_node(&*node.name, op, [mapping[&node.inputs[0]]].as_ref())
+            let op = AxisOp::Permute(axes);
+            target.wire_node(&*node.name, op, &[mapping[&node.inputs[0]]])
         } else {
             bail!("Nees axes to be const")
         }

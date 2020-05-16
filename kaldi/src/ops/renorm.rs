@@ -1,5 +1,4 @@
-use tract_core::internal::*;
-use tract_core::ndarray;
+use tract_hir::internal::*;
 
 use crate::model::ParsingContext;
 
@@ -13,10 +12,14 @@ pub fn renorm(ctx: &ParsingContext, name: &str) -> TractResult<Box<dyn Inference
     Ok(Box::new(Renorm::new(rms)))
 }
 
-#[derive(Clone, Debug, new)]
+#[derive(Clone, Debug, new, Educe)]
+#[educe(Hash)]
 struct Renorm {
+    #[educe(Hash(method="hash_f32"))]
     target_rms: f32,
 }
+
+tract_linalg::impl_dyn_hash!(Renorm);
 
 impl Op for Renorm {
     fn name(&self) -> std::borrow::Cow<str> {
@@ -29,8 +32,8 @@ impl Op for Renorm {
 impl StatelessOp for Renorm {
     fn eval(&self, mut inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
         let input = args_1!(inputs);
-        let mut input: ndarray::Array2<f32> =
-            input.into_tensor().into_array()?.into_dimensionality::<ndarray::Ix2>()?;
+        let mut input: tract_ndarray::Array2<f32> =
+            input.into_tensor().into_array()?.into_dimensionality::<tract_ndarray::Ix2>()?;
         let rms_sqrt_d = self.target_rms * (input.shape()[1] as f32).sqrt();
         input.genrows_mut().into_iter().for_each(|mut row| {
             let factor = rms_sqrt_d
@@ -55,12 +58,12 @@ impl InferenceRulesOp for Renorm {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
     to_typed!();
 }
 
 impl TypedOp for Renorm {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         Ok(tvec!(inputs[0].clone()))
@@ -87,6 +90,6 @@ impl PulsedOp for Renorm {
         Ok(tvec!(inputs[0].clone()))
     }
 
-    pulsed_op_as_op!();
+    as_op!();
     pulsed_op_to_typed_op!();
 }

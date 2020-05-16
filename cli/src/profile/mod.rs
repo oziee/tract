@@ -2,18 +2,27 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 
 use ansi_term::Color::*;
-use itertools::Itertools;
 
 use tract_core::internal::*;
 
 use crate::display_graph::DisplayOptions;
 use crate::errors::*;
 use crate::format::*;
-use crate::rusage::Duration;
 use crate::{Parameters, ProfilingMode};
+use std::time::Duration;
 
 mod regular;
 //mod streaming;
+
+trait Scalable {
+    fn scale(self, scale: f32) -> Self;
+}
+
+impl Scalable for std::time::Duration {
+    fn scale(self, scale: f32) -> Duration {
+        Duration::from_secs_f32(scale * self.as_secs_f32())
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ProfileData {
@@ -31,19 +40,8 @@ impl ProfileData {
         Ok(())
     }
 
-    pub fn most_consuming_nodes(&self) -> CliResult<Vec<TVec<usize>>> {
-        let top = self
-            .nodes
-            .iter()
-            .sorted_by(|(_, a), (_, b)| {
-                a.avg_real().partial_cmp(&b.avg_real()).unwrap_or(::std::cmp::Ordering::Greater)
-            })
-            .into_iter()
-            .rev()
-            .take(20)
-            .map(|a| a.0.iter().cloned().collect())
-            .collect();
-        Ok(top)
+    pub fn nodes_above(&self, dur: Duration) -> CliResult<Vec<TVec<usize>>> {
+        Ok(self.nodes.iter().filter(|n| *n.1 > dur).map(|n| n.0.clone()).collect())
     }
 
     fn op_name_for_id(model: &dyn Model, id: &[usize]) -> CliResult<String> {
@@ -55,10 +53,10 @@ impl ProfileData {
         }
     }
 
-    pub fn print_most_consuming_ops<TI, O>(&self, model: &ModelImpl<TI, O>) -> CliResult<()>
+    pub fn print_most_consuming_ops<F, O>(&self, model: &ModelImpl<F, O>) -> CliResult<()>
     where
-        TI: Fact + Clone + 'static,
-        O: AsRef<dyn Op> + AsMut<dyn Op> + Display + Debug + Clone + 'static,
+        F: Fact + Clone + 'static + Hash,
+        O: AsRef<dyn Op> + AsMut<dyn Op> + Display + Debug + Clone + 'static + Hash,
     {
         let sum = self.summed();
         println!("Most time consuming operations:");
@@ -71,12 +69,7 @@ impl ProfileData {
         }
         let mut operations: Vec<(&str, Duration)> =
             operations.iter().map(|(s, d)| (&**s, *d)).collect();
-        operations.sort_by(|(_, a), (_, b)| {
-            a.avg_real()
-                .partial_cmp(&b.avg_real())
-                .unwrap_or(::std::cmp::Ordering::Greater)
-                .reverse()
-        });
+        operations.sort_by(|(_, a), (_, b)| b.cmp(&a));
         for (operation, measure) in operations.iter().take(5) {
             println!(
                 "{:20} {:3} nodes: {}",
@@ -89,21 +82,25 @@ impl ProfileData {
     }
 
     pub fn summed(&self) -> Duration {
-        let total_real = self.nodes.values().map(|n| n.avg_real()).sum();
-        let total_sys = self.nodes.values().map(|n| n.avg_sys()).sum();
-        let total_user = self.nodes.values().map(|n| n.avg_user()).sum();
-        Duration { total_real, total_sys, total_user }
+        self.nodes.values().sum()
+    }
+
+    pub fn scale(&mut self, factor: f64) {
+        self.nodes.values_mut().for_each(|n| *n = Duration::from_secs_f64(n.as_secs_f64() * factor))
     }
 }
 
 /// Handles the `profile` subcommand.
 pub fn handle(
-    params: Parameters,
+    params: &Parameters,
     profiling: ProfilingMode,
     display_options: DisplayOptions,
+    monitor: Option<&readings_probe::Probe>,
 ) -> CliResult<()> {
     match &profiling {
         ProfilingMode::Regular { .. } => regular::handle(params, profiling, display_options),
-        ProfilingMode::RegularBenching { .. } => regular::handle_benching(params, profiling),
+        ProfilingMode::RegularBenching { .. } => {
+            regular::handle_benching(params, profiling, monitor)
+        }
     }
 }

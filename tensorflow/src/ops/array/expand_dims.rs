@@ -1,4 +1,4 @@
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 use crate::model::ParsingContext;
 use crate::tfpb::tensorflow::NodeDef;
@@ -7,8 +7,10 @@ pub fn build(_ctx: &ParsingContext, _pb: &NodeDef) -> TractResult<Box<dyn Infere
     Ok(Box::new(ExpandDims))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct ExpandDims;
+
+tract_linalg::impl_dyn_hash!(ExpandDims);
 
 impl ExpandDims {
     fn eval_t<T: Datum>(
@@ -80,7 +82,7 @@ impl InferenceRulesOp for ExpandDims {
         })
     }
 
-    inference_op_as_op!();
+    as_op!();
 
     fn to_typed(
         &self,
@@ -90,21 +92,28 @@ impl InferenceRulesOp for ExpandDims {
         mapping: &HashMap<OutletId, OutletId>,
     ) -> TractResult<TVec<OutletId>> {
         if let Some(ref axes) = target.outlet_fact(mapping[&node.inputs[1]])?.konst {
-            let axes = axes.cast_to::<i64>()?;
-            let op = tract_core::ops::array::AddDims::new(
-                axes.as_slice::<i64>()?
-                    .iter()
-                    .map(|&ax| {
-                        Ok(if ax < 0 {
-                            (ax + target.outlet_fact(mapping[&node.inputs[0]])?.shape.rank() as i64)
-                                as usize
-                        } else {
-                            ax as usize
-                        })
+            let mut axes = axes
+                .cast_to::<i64>()?
+                .as_slice::<i64>()?
+                .iter()
+                .map(|&axis| {
+                    Ok(if axis < 0 {
+                        axis + target.outlet_fact(mapping[&node.inputs[0]])?.shape.rank() as i64
+                    } else {
+                        axis
                     })
-                    .collect::<TractResult<_>>()?,
-            );
-            target.wire_node(&*node.name, op, [mapping[&node.inputs[0]]].as_ref())
+                })
+                .collect::<TractResult<Vec<_>>>()?;
+            axes.sort();
+            let mut wire = mapping[&node.inputs[0]];
+            for axis in axes.iter().rev() {
+                wire = target.wire_node(
+                    format!("{}-axis-{}", node.name, axis),
+                    AxisOp::Add(*axis as _),
+                    &[wire],
+                )?[0];
+            }
+            Ok(tvec!(wire))
         } else {
             bail!("Need axes to be const")
         }

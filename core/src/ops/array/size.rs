@@ -1,21 +1,10 @@
-use num_traits::AsPrimitive;
-
 use crate::internal::*;
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct Size {
-    dt: DatumType,
+    pub dt: DatumType,
 }
-
-impl Size {
-    pub fn coerce_to<T>(size: usize) -> TractResult<Arc<Tensor>>
-    where
-        T: Copy + Datum,
-        usize: AsPrimitive<T>,
-    {
-        Ok(rctensor0(size.as_()))
-    }
-}
+tract_linalg::impl_dyn_hash!(Size);
 
 impl Op for Size {
     fn name(&self) -> Cow<str> {
@@ -29,27 +18,10 @@ impl Op for Size {
 impl StatelessOp for Size {
     /// Evaluates the operation given the input tensors.
     fn eval(&self, inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
-        let size = inputs[0].shape().iter().product();
-        Ok(tvec![dispatch_numbers!(Self::coerce_to(self.dt)(size))?])
+        let size = inputs[0].shape().iter().product::<usize>();
+        let size = rctensor0(size as i64).cast_to_dt(self.dt)?.into_owned();
+        Ok(tvec!(size.into_arc_tensor()))
     }
-}
-
-impl InferenceRulesOp for Size {
-    fn rules<'r, 'p: 'r, 's: 'r>(
-        &'s self,
-        s: &mut Solver<'r>,
-        inputs: &'p [TensorProxy],
-        outputs: &'p [TensorProxy],
-    ) -> InferenceResult {
-        check_input_arity(&inputs, 1)?;
-        check_output_arity(&outputs, 1)?;
-        s.equals(&outputs[0].datum_type, self.dt)?;
-        s.equals(&outputs[0].rank, 0)?;
-        Ok(())
-    }
-
-    inference_op_as_op!();
-    to_typed!();
 }
 
 impl TypedOp for Size {
@@ -57,5 +29,5 @@ impl TypedOp for Size {
         Ok(tvec!(TypedFact::dt_shape(self.dt, [0usize; 0].as_ref())?))
     }
 
-    typed_op_as_op!();
+    as_op!();
 }

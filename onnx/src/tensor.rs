@@ -2,8 +2,7 @@ use crate::pb::tensor_proto::DataType;
 use crate::pb::*;
 use prost::Message;
 use std::convert::{TryFrom, TryInto};
-use tract_core::internal::*;
-use tract_core::*;
+use tract_hir::internal::*;
 
 impl TryFrom<DataType> for DatumType {
     type Error = TractError;
@@ -23,7 +22,6 @@ impl TryFrom<DataType> for DatumType {
             _ => Err(format!("Unknown DatumType {:?}", t))?,
         }
     }
-
 }
 
 impl<'a> TryFrom<&'a type_proto::Tensor> for InferenceFact {
@@ -45,7 +43,7 @@ impl<'a> TryFrom<&'a type_proto::Tensor> for InferenceFact {
                     fact
                 })
                 .collect();
-            fact = fact.with_shape(ShapeFact::closed(shape));
+            fact = fact.with_shape(ShapeFactoid::closed(shape));
         }
         Ok(fact)
     }
@@ -83,7 +81,7 @@ impl<'a> TryFrom<&'a TensorProto> for Tensor {
                 }
             }
         } else {
-            use ndarray::Array;
+            use tract_ndarray::Array;
             let it = match dt {
                 DatumType::Bool => {
                     Array::from_shape_vec(&*shape, t.int32_data.iter().map(|&x| x != 0).collect())?
@@ -107,18 +105,10 @@ impl<'a> TryFrom<&'a TensorProto> for Tensor {
                     t.int32_data.iter().map(|&x| x as i16).collect(),
                 )?
                 .into(),
-                DatumType::I32 => {
-                    Array::from_shape_vec(&*shape, t.int32_data.to_vec())?.into()
-                }
-                DatumType::I64 => {
-                    Array::from_shape_vec(&*shape, t.int64_data.to_vec())?.into()
-                }
-                DatumType::F32 => {
-                    Array::from_shape_vec(&*shape, t.float_data.to_vec())?.into()
-                }
-                DatumType::F64 => {
-                    Array::from_shape_vec(&*shape, t.double_data.to_vec())?.into()
-                }
+                DatumType::I32 => Array::from_shape_vec(&*shape, t.int32_data.to_vec())?.into(),
+                DatumType::I64 => Array::from_shape_vec(&*shape, t.int64_data.to_vec())?.into(),
+                DatumType::F32 => Array::from_shape_vec(&*shape, t.float_data.to_vec())?.into(),
+                DatumType::F64 => Array::from_shape_vec(&*shape, t.double_data.to_vec())?.into(),
                 DatumType::String => {
                     let strings = t
                         .string_data
@@ -146,7 +136,8 @@ impl TryFrom<TensorProto> for Tensor {
 pub fn proto_from_reader<R: ::std::io::Read>(mut r: R) -> TractResult<TensorProto> {
     let mut v = vec![];
     r.read_to_end(&mut v)?;
-    TensorProto::decode(v).map_err(|e| format!("Can not parse protobuf input: {:?}", e).into())
+    let b = bytes::Bytes::from(v);
+    TensorProto::decode(b).map_err(|e| format!("Can not parse protobuf input: {:?}", e).into())
 }
 
 pub fn from_reader<R: ::std::io::Read>(r: R) -> TractResult<Tensor> {

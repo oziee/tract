@@ -1,4 +1,4 @@
-use tract_core::internal::*;
+use tract_hir::internal::*;
 
 use crate::model::TfOpRegister;
 
@@ -10,15 +10,17 @@ pub fn register_all_ops(reg: &mut TfOpRegister) {
     reg.insert("LoopCond", |_, _| Ok(Box::new(LoopGate(LoopGateRole::LoopCond))));
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub enum LoopGateRole {
     Enter(String),
     Exit,
     LoopCond,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct LoopGate(LoopGateRole);
+
+tract_linalg::impl_dyn_hash!(LoopGate);
 
 impl Op for LoopGate {
     fn name(&self) -> Cow<str> {
@@ -48,20 +50,22 @@ impl InferenceRulesOp for LoopGate {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash)]
 pub enum NextIterationRole {
     Source,
     Sink,
 }
 
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone, new, Hash)]
 pub struct NextIteration {
     name: String,
     role: NextIterationRole,
 }
+
+tract_linalg::impl_dyn_hash!(NextIteration);
 
 impl Op for NextIteration {
     fn name(&self) -> Cow<str> {
@@ -101,5 +105,5 @@ impl InferenceRulesOp for NextIteration {
         Ok(())
     }
 
-    inference_op_as_op!();
+    as_op!();
 }

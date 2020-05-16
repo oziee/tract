@@ -20,18 +20,20 @@ impl DelayState {
         output_shape[op.axis] = output_pulse;
         // build output
         let output = if op.delay < input_pulse {
-            let mut output = unsafe { T::uninitialized_array(&*output_shape) };
+            let mut output = unsafe { Tensor::uninitialized::<T>(&*output_shape)? };
             let from_input = input_pulse - op.delay;
             let from_buffer = output_pulse - from_input;
             output
+                .to_array_view_mut::<T>()?
                 .slice_axis_mut(axis, Slice::from(..from_buffer))
                 .assign(&buffer.slice_axis(axis, Slice::from(..from_buffer)));
             output
+                .to_array_view_mut::<T>()?
                 .slice_axis_mut(axis, Slice::from(from_buffer..))
                 .assign(&input.slice_axis(axis, Slice::from(..from_input)));
             output
         } else {
-            buffer.slice_axis(axis, Slice::from(..output_pulse)).to_owned()
+            buffer.slice_axis(axis, Slice::from(..output_pulse)).to_owned().into_tensor()
         };
         // maintain buffer
         if buffered < input_pulse {
@@ -59,7 +61,7 @@ impl OpState for DelayState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Delay {
     datum_type: DatumType,
     buffer_shape: TVec<usize>,
@@ -67,6 +69,8 @@ pub struct Delay {
     delay: usize,
     overlap: usize,
 }
+
+tract_linalg::impl_dyn_hash!(Delay);
 
 impl Delay {
     pub fn new(input_fact: &PulsedFact, delay: usize, overlap: usize) -> Delay {
@@ -107,7 +111,7 @@ impl StatefullOp for Delay {
 }
 
 impl TypedOp for Delay {
-    typed_op_as_op!();
+    as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
         let mut fact = inputs[0].clone();
@@ -131,7 +135,7 @@ impl PulsedOp for Delay {
         Ok(tvec!(fact))
     }
 
-    pulsed_op_as_op!();
+    as_op!();
     pulsed_op_to_typed_op!();
 }
 
