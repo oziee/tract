@@ -62,6 +62,7 @@ impl Op for TypedConcat {
         "Concat".into()
     }
 
+    op_core_lir_mir!();
     op_as_typed_op!();
     not_a_pulsed_op!();
     canonic!();
@@ -255,7 +256,7 @@ impl TypedConcat {
         let before = pre.shape()[self.axis];
         if fact.delay < before {
             input = target.wire_node(
-                format!("{}/Delay", node.name),
+                format!("{}.Delay", node.name),
                 Delay::new(&fact.clone(), before - fact.delay, 0),
                 &[input],
             )?[0];
@@ -364,6 +365,7 @@ impl Op for PulsedSameAxisConcat {
         "PulsedSameAxisConcat".into()
     }
 
+    op_core_lir_mir!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }

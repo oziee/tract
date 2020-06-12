@@ -41,6 +41,7 @@
 //! core operator could be chosen.
 use std::collections::HashMap;
 use std::str;
+use std::borrow::Cow;
 
 use itertools::Itertools;
 
@@ -119,6 +120,9 @@ pub trait Model: downcast_rs::Downcast + std::fmt::Debug + dyn_clone::DynClone {
 
     /// List consumers of an outlet
     fn outlet_successors(&self, outlet: OutletId) -> &[InletId];
+
+    /// Nested models, with label (for audit).
+    fn nested_models(&self, node: usize) -> Vec<(Cow<str>, &dyn Model, Vec<String>, Vec<String>)>;
 }
 
 impl_downcast!(Model);
@@ -135,7 +139,7 @@ pub type TypedSimplePlan<M> = SimplePlan<TypedFact, Box<dyn TypedOp>, M>;
 pub type TypedSimpleState<M, P> = SimpleState<TypedFact, Box<dyn TypedOp>, M, P>;
 
 /// A model with determined types and shapes, where constant have been
-/// eleminated from the graph.
+/// eliminated from the graph.
 pub type NormalizedModel = ModelImpl<NormalizedFact, Box<dyn TypedOp>>;
 /// A Node for NormalizedModel.
 pub type NormalizedNode = BaseNode<NormalizedFact, Box<dyn TypedOp>>;
@@ -145,6 +149,9 @@ pub type NormalizedModelPatch = ModelPatch<NormalizedFact, Box<dyn TypedOp>>;
 pub type NormalizedSimplePlan<M> = SimplePlan<NormalizedFact, Box<dyn TypedOp>, M>;
 /// An execution state for TypedModel.
 pub type NormalizedSimpleState<M, P> = SimpleState<NormalizedFact, Box<dyn TypedOp>, M, P>;
+
+/// A runnable model with fixed inputs and outputs.
+pub type RunnableModel<F, O, M> = SimplePlan<F, O, M>;
 
 impl TypedModel {
     pub fn signature(&self) -> u64 {

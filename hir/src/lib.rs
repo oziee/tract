@@ -25,6 +25,7 @@ pub mod ops {
     pub mod downsample;
     pub mod dummy;
     pub mod element_wise;
+    pub mod expandable;
     pub mod identity;
     pub mod konst;
     pub mod logic;
@@ -50,6 +51,7 @@ pub mod internal {
     pub use crate::infer::*;
     pub use tract_core::internal::*;
     pub use {shapefactoid, to_typed};
+    pub use crate::ops::expandable::{ expand, Expansion };
 }
 
 #[cfg(test)]

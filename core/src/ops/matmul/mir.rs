@@ -19,10 +19,6 @@ fn eval(
 ) -> TractResult<Tensor> {
     if let Some(q) = q_params {
         if (a.datum_type(), b.datum_type()) == (i8::datum_type(), i8::datum_type()) {
-            return eval_t(a, b, a_trans, b_trans, c_trans, q_params, &|m, k, n| {
-                MMMWrapper::Quant((tract_linalg::ops().qmmm_i8_i32)(m, k, n))
-            });
-        } else if (a.datum_type(), b.datum_type()) == (i8::datum_type(), i8::datum_type()) {
             if q.c_datum_type == i32::datum_type() {
                 return eval_t(a, b, a_trans, b_trans, c_trans, q_params, &|m, k, n| {
                     MMMWrapper::Quant((tract_linalg::ops().qmmm_i8_i32)(m, k, n))
@@ -333,6 +329,7 @@ impl Op for MatMul {
         "MatMul".into()
     }
 
+    op_core_mir!();
     op_as_typed_op!();
     not_a_pulsed_op!();
 }
@@ -422,7 +419,7 @@ tract_linalg::impl_dyn_hash!(MatMulUnary);
 
 impl Op for MatMulUnary {
     fn name(&self) -> Cow<str> {
-        "MatMulUnary".into()
+        "MatMul".into()
     }
 
     fn info(&self) -> TractResult<Vec<String>> {
@@ -440,6 +437,7 @@ impl Op for MatMulUnary {
     }
 
     canonic!();
+    op_core_mir!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }
@@ -587,7 +585,7 @@ impl TypedOp for MatMulUnary {
                 for (ix, slice) in concat.slices.iter().enumerate() {
                     let wire = match slice {
                         ConcatSlice::Const(t) => patch.add_const(
-                            format!("{}-const-{}", node.name, ix),
+                            format!("{}.const-{}", node.name, ix),
                             t.clone().into_arc_tensor(),
                         )?,
                         ConcatSlice::Var => {
@@ -600,7 +598,7 @@ impl TypedOp for MatMulUnary {
                         a.remove_axis(0)?;
                     }
                     let wire = patch.wire_node(
-                        format!("{}-k-{}-{}", node.name, offsets[ix], offsets[ix + 1]),
+                        format!("{}.k-{}-{}", node.name, offsets[ix], offsets[ix + 1]),
                         MatMulUnary { a: a.into_arc_tensor(), ..self.clone() },
                         &[wire],
                     )?[0];
@@ -609,7 +607,7 @@ impl TypedOp for MatMulUnary {
                 let mut wire = wires[0];
                 for (ix, w) in wires[1..].iter().enumerate() {
                     wire = patch.wire_node(
-                        format!("{}-k-add-{}", node.name, ix),
+                        format!("{}.k-add-{}", node.name, ix),
                         crate::ops::binary::TypedBinOp(Box::new(crate::ops::math::Add)),
                         &[wire, *w],
                     )?[0];
@@ -639,7 +637,7 @@ impl TypedOp for MatMulUnary {
             let wire = patch.tap_model(model, node.inputs[0])?;
             return Ok(Some(
                 patch.wire_node(
-                    format!("{}-sliced-m-{}-{}", node.name, start, end),
+                    format!("{}.sliced-m-{}-{}", node.name, start, end),
                     Self { a, ..self.clone() },
                     &[wire],
                 )?[0],
@@ -747,7 +745,8 @@ impl TypedOp for MatMulUnary {
 impl PulsedOp for MatMulUnary {
     fn pulsed_output_facts(&self, inputs: &[&PulsedFact]) -> TractResult<TVec<PulsedFact>> {
         let mut fact = inputs[0].clone();
-        fact.datum_type = self.q_params.as_ref().map(|qp| qp.c_datum_type).unwrap_or(inputs[0].datum_type);
+        fact.datum_type =
+            self.q_params.as_ref().map(|qp| qp.c_datum_type).unwrap_or(inputs[0].datum_type);
         fact.shape = compute_shapes(
             self.a.shape().into_iter().map(|d| d.to_dim()).collect::<TVec<_>>(),
             inputs[0].shape.iter().map(|d| d.to_dim()).collect::<TVec<_>>(),
@@ -834,8 +833,8 @@ where
         let mut packed_b_shape: TVec<usize> = b_shape[..b_shape.len() - 2].into();
         packed_b_shape.push(geo.mm.as_mmm().b_pack().len());
         wire = patch.wire_node(
-            format!("{}-pack", &*node.name),
-            phy::MatMatMulPackB {
+            format!("{}.pack", &*node.name),
+            lir::MatMatMulPackB {
                 pack_b: geo.mm.as_mmm().b_pack().clone(),
                 col_stride: if b_trans { *b_shape.last().unwrap() as isize } else { 1 },
                 row_stride: if b_trans { 1 } else { *b_shape.last().unwrap() as isize },
@@ -864,8 +863,8 @@ where
         None
     };
     wire = patch.wire_node(
-        format!("{}-matmatmul", &*node.name),
-        phy::MatMatMulUnaryFinite {
+        format!("{}.matmatmul", &*node.name),
+        lir::MatMatMulUnaryFinite {
             c_trans,
             bc_c_shape: geo.bc_c_shape,
             c_fact: TypedFact::dt_shape(TC::datum_type(), &*geo.final_c_shape)?,
@@ -923,5 +922,30 @@ mod test {
         let op = MatMul::default().with_a_trans(true).with_b_trans(true).with_c_trans(true);
         let c_found = op.eval(tvec!(b, a)).unwrap().pop().unwrap();
         c.close_enough(&c_found, true).unwrap();
+    }
+
+    #[test]
+    fn batch_input() -> TractResult<()> {
+        crate::setup_test_logger();
+        let (batch, len, ci, co) = (2, 3, 4, 5);
+        let mut model = TypedModel::default();
+        let input_shape = tvec!(batch, len, ci);
+        let mut wire =
+            tvec!(model.add_source("s", TypedFact::dt_shape(f32::datum_type(), &*input_shape)?)?);
+        let a = unsafe { Tensor::uninitialized::<f32>(&[ci, co])?.into_arc_tensor() };
+        wire = model.wire_node(
+            "m",
+            MatMulUnary { a, a_trans: true, b_trans: true, c_trans: true, q_params: None },
+            &wire,
+        )?;
+        let b = unsafe { Tensor::uninitialized::<f32>(&[1, 1, co])?.into_arc_tensor() };
+        wire = model.wire_node("a", crate::ops::math::add::unary(b), &wire)?;
+        model.set_output_outlets(&wire)?;
+        let input = unsafe { Tensor::uninitialized::<f32>(&input_shape)? };
+        trace!("running mir");
+        model.clone().into_runnable()?.run(tvec!(input.clone()))?;
+        trace!("running optimized");
+        model.into_optimized()?.into_runnable()?.run(tvec!(input))?;
+        Ok(())
     }
 }

@@ -43,9 +43,10 @@ pub fn reduce(pb: &NodeDef, op: nn::Reducer) -> TractResult<Box<dyn InferenceOp>
 
 impl Op for Reduce {
     fn name(&self) -> Cow<str> {
-        format!("tf.{:?}", self.reducer).into()
+        format!("{:?}", self.reducer).into()
     }
 
+    op_tf!();
     not_a_typed_op!();
 }
 
@@ -54,7 +55,7 @@ impl StatelessOp for Reduce {
         let (input, axes) = args_2!(inputs);
         let axes: Vec<i64> = axes.cast_to::<i64>()?.as_slice::<i64>()?.to_vec();
         let op = nn::Reduce::new(Some(axes), self.keep_dims, self.reducer);
-        op.eval(tvec!(input))
+        expand(op).as_stateless().unwrap().eval(tvec!(input))
     }
 }
 
@@ -118,7 +119,7 @@ impl InferenceRulesOp for Reduce {
 
     fn to_typed(
         &self,
-        source: &InferenceModel,
+        _source: &InferenceModel,
         node: &InferenceNode,
         target: &mut TypedModel,
         mapping: &HashMap<OutletId, OutletId>,
@@ -126,7 +127,7 @@ impl InferenceRulesOp for Reduce {
         if let Some(ref axes) = target.outlet_fact(mapping[&node.inputs[1]])?.konst {
             let axes: Vec<i64> = axes.cast_to::<i64>()?.as_slice::<i64>()?.to_vec();
             let op = nn::Reduce::new(Some(axes), self.keep_dims, self.reducer);
-            InferenceOp::to_typed(&op, source, node, target, mapping)
+            op.wire(&node.name, target, &[mapping[&node.inputs[0]]])
         } else {
             bail!("Nees axes to be const")
         }

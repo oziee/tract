@@ -9,6 +9,8 @@ extern crate atty;
 extern crate env_logger;
 extern crate pbr;
 #[macro_use]
+extern crate serde_derive;
+#[macro_use]
 extern crate tract_core;
 #[cfg(feature = "onnx")]
 extern crate tract_onnx;
@@ -29,24 +31,27 @@ use tract_hir::internal::*;
 #[cfg(feature = "tf")]
 use tract_tensorflow::tfpb::tensorflow::GraphDef;
 
-use crate::display_graph::DisplayOptions;
+use crate::display_params::DisplayParams;
 use crate::errors::*;
 
 use readings_probe::*;
 
+mod annotations;
+mod bench;
 mod compare;
 mod cost;
-mod display_graph;
+mod display_params;
 mod draw;
 mod dump;
 mod errors;
-mod format;
+mod export;
 mod optimize_check;
 mod profile;
 mod run;
 // mod rusage;
 mod stream_check;
 mod tensor;
+mod terminal;
 mod utils;
 
 readings_probe::instrumented_allocator!();
@@ -78,7 +83,7 @@ fn main() {
 
     (@arg readings: --readings "Start readings instrumentation")
     (@arg readings_heartbeat: --("readings-heartbeat") +takes_value
-        default_value("0.5") "Set heartbeat (ms)")
+     default_value("5") "Set heartbeat (ms)")
 
     (@arg model: +takes_value "Sets the model to use")
 
@@ -108,6 +113,9 @@ fn main() {
 
     (@arg kaldi_right_context: --("kaldi-right-context") +takes_value
      "Add lines of right context to input (dupping last time frame)")
+
+    (@arg onnx_test_data_set: --("onnx-test-data-set") +takes_value
+     "Use onnx-test data-set as input (expect test_data_set_N dir with input_X.pb, etc. inside)")
 
     (@arg input_node: --("input-node") +takes_value +multiple number_of_values(1)
      "Override input nodes names (auto-detects otherwise).")
@@ -185,51 +193,49 @@ fn main() {
         .arg(Arg::with_name("pbdir").takes_value(true).required(true).help("protobuf dir"));
     app = app.subcommand(output_options(compare_pbdir));
 
+    let bench = clap::SubCommand::with_name("bench")
+        .long_about("Benchmarks tract on randomly generated input.");
+    let bench = output_options(bench);
+    let bench = benchlimits_options(bench);
+    app = app.subcommand(bench);
+
+    let criterion = clap::SubCommand::with_name("criterion")
+        .long_about("Benchmarks tract on randomly generated input using criterion.");
+    app = app.subcommand(criterion);
+
     let dump = clap::SubCommand::with_name("dump")
         .long_about("Dumps the Tensorflow graph in human readable form.")
+        .arg(Arg::with_name("cost").long("cost").help("Include const information"))
+        .arg(Arg::with_name("profile").long("profile").help("Include results for profile run"))
+        .arg(
+            Arg::with_name("assert-cost")
+            .takes_value(true)
+            .long("assert-cost")
+            .help("Checks computed against the provided value (form: \"FMA(F32)=2060448 DIV(F32)=24576\")")
+            )
         .arg(
             Arg::with_name("assert-output")
-                .takes_value(true)
-                .long("assert-output")
-                .help("Fact to check the ouput tensor against (@filename, or 3x4xf32)"),
-        )
+            .takes_value(true)
+            .long("assert-output")
+            .help("Fact to check the ouput tensor against (@filename, or 3x4xf32)"),
+            )
         .arg(
             Arg::with_name("assert-output-fact")
-                .takes_value(true)
-                .long("assert-output-fact")
-                .help("Infered shape and datum type must match exactly this"),
-        )
+            .takes_value(true)
+            .long("assert-output-fact")
+            .help("Infered shape and datum type must match exactly this"),
+            )
         .arg(
             Arg::with_name("inner")
-                .takes_value(true)
-                .number_of_values(1)
-                .multiple(true)
-                .long("inner")
-                .help("Navigate to a sub-model"),
-        );
-    app = app.subcommand(output_options(dump));
-
-    let profile =
-        clap::SubCommand::with_name("profile")
-            .long_about("Benchmarks tract on randomly generated input.")
-            .arg(Arg::with_name("bench").long("bench").help("Run as an overall bench"))
-            .arg(
-                Arg::with_name("max_iters").takes_value(true).long("max-iters").short("n").help(
-                    "Sets the maximum number of iterations for each node [default: 100_000].",
-                ),
-            )
-            .arg(
-                Arg::with_name("max-time")
-                    .takes_value(true)
-                    .long("max-time")
-                    .help("Sets the maximum execution time for each node (in ms) [default: 5000]."),
-            )
-            .arg(
-                Arg::with_name("buffering")
-                    .short("b")
-                    .help("Run the stream network without inner instrumentations"),
+            .takes_value(true)
+            .number_of_values(1)
+            .multiple(true)
+            .long("inner")
+            .help("Navigate to a sub-model"),
             );
-    app = app.subcommand(output_options(profile));
+    let dump = output_options(dump);
+    let dump = benchlimits_options(dump);
+    app = app.subcommand(dump);
 
     let run = clap::SubCommand::with_name("run")
         .long_about("Run the graph")
@@ -253,16 +259,6 @@ fn main() {
                 .help("Infered shape and datum type must match exactly this"),
         );
     app = app.subcommand(output_options(run));
-
-    let cost = clap::SubCommand::with_name("cost")
-        .long_about("Compute a cost on (some) operations.")
-        .arg(
-            Arg::with_name("assert-cost")
-            .takes_value(true)
-            .long("assert-cost")
-            .help("Checks computed against the provided value (form: \"FMA(F32)=2060448 DIV(F32)=24576\")")
-            );
-    app = app.subcommand(output_options(cost));
 
     let optimize = clap::SubCommand::with_name("optimize").help("Optimize the graph");
     app = app.subcommand(output_options(optimize));
@@ -313,6 +309,24 @@ fn main() {
     info_usage("done", probe.as_ref());
 }
 
+fn benchlimits_options<'a, 'b>(command: clap::App<'a, 'b>) -> clap::App<'a, 'b> {
+    use clap::*;
+    command
+        .arg(
+            Arg::with_name("max_iters")
+                .takes_value(true)
+                .long("max-iters")
+                .short("n")
+                .help("Sets the maximum number of iterations for each node [default: 100_000]."),
+        )
+        .arg(
+            Arg::with_name("max-time")
+                .takes_value(true)
+                .long("max-time")
+                .help("Sets the maximum execution time for each node (in ms) [default: 5000]."),
+        )
+}
+
 fn output_options<'a, 'b>(command: clap::App<'a, 'b>) -> clap::App<'a, 'b> {
     use clap::*;
     command
@@ -348,6 +362,10 @@ fn output_options<'a, 'b>(command: clap::App<'a, 'b>) -> clap::App<'a, 'b> {
                 .help("Select one node to dump"),
         )
         .arg(Arg::with_name("const").long("const").help("also display consts nodes"))
+        .arg(Arg::with_name("info").long("info").help("show op inner information"))
+        .arg(Arg::with_name("io-long").long("io-long").help("show full i/o information"))
+        .arg(Arg::with_name("io-none").long("io-none").help("hide i/o information"))
+        .arg(Arg::with_name("json").long("json").help("dump performance info as json"))
         .arg(Arg::with_name("outlet-labels").long("outlet-labels").help("display outlet labels"))
         .arg(
             Arg::with_name("invariants")
@@ -362,10 +380,10 @@ pub enum SomeGraphDef {
     NoGraphDef,
     #[cfg(feature = "kaldi")]
     Kaldi(tract_kaldi::KaldiProtoModel),
-    #[cfg(feature = "tf")]
-    Tf(GraphDef),
     #[cfg(feature = "onnx")]
     Onnx(tract_onnx::pb::ModelProto, tract_onnx::model::ParseResult),
+    #[cfg(feature = "tf")]
+    Tf(GraphDef),
 }
 
 /// Structure holding the parsed parameters.
@@ -401,12 +419,21 @@ impl Parameters {
     #[allow(unused_variables)]
     /// Parses the command-line arguments.
     pub fn from_clap(matches: &clap::ArgMatches, probe: Option<&Probe>) -> CliResult<Parameters> {
-        let name = matches.value_of("model").ok_or("Model argument required")?;
-        let format = matches.value_of("format").unwrap_or(if name.ends_with(".onnx") {
-            "onnx"
-        } else {
-            "tf"
-        });
+        let filename = matches.value_of("model").ok_or("Model argument required")?;
+        let filename = std::path::PathBuf::from(filename);
+        let (filename, onnx_tc) =
+            if std::fs::metadata(&filename)?.is_dir() && filename.join("model.onnx").exists() {
+                (filename.join("model.onnx"), true)
+            } else {
+                (filename, false)
+            };
+        let format = matches.value_of("format").unwrap_or(
+            if filename.extension().and_then(|s| s.to_str()) == Some("onnx") {
+                "onnx"
+            } else {
+                "tf"
+            },
+        );
 
         let need_graph =
             matches.is_present("proto") || matches.subcommand_name() == Some("compare-pbdir");
@@ -416,7 +443,7 @@ impl Parameters {
             "kaldi" => {
                 let kaldi = tract_kaldi::kaldi();
                 info_usage("loaded framework (kaldi)", probe);
-                let mut graph = kaldi.proto_model_for_path(&name)?;
+                let mut graph = kaldi.proto_model_for_path(&filename)?;
                 info_usage("proto model loaded", probe);
                 if let Some(i) = matches.value_of("kaldi_adjust_final_offset") {
                     graph.adjust_final_offset = i.parse()?;
@@ -432,7 +459,7 @@ impl Parameters {
             "onnx" => {
                 let onnx = tract_onnx::onnx();
                 info_usage("loaded framework (onnx)", probe);
-                let graph = onnx.proto_model_for_path(&name)?;
+                let graph = onnx.proto_model_for_path(&filename)?;
                 info_usage("proto model loaded", probe);
                 let parsed = onnx.parse(&graph)?;
                 if need_graph {
@@ -445,7 +472,7 @@ impl Parameters {
             "tf" => {
                 let tf = tract_tensorflow::tensorflow();
                 info_usage("loaded framework (tf)", probe);
-                let mut graph = tf.proto_model_for_path(&name)?;
+                let mut graph = tf.proto_model_for_path(&filename)?;
                 info_usage("proto model loaded", probe);
                 if matches.is_present("determinize") {
                     tract_tensorflow::Tensorflow::determinize(&mut graph)?;
@@ -472,7 +499,7 @@ impl Parameters {
             ),
         };
 
-        info!("Model {:?} loaded", name);
+        info!("Model {:?} loaded", filename);
         info_usage("model loaded", probe);
 
         #[cfg(feature = "conform")]
@@ -486,7 +513,7 @@ impl Parameters {
                     unreachable!()
                 }
             } else {
-                Some(tract_tensorflow::conform::tf::for_path(&name)?)
+                Some(tract_tensorflow::conform::tf::for_path(&filename)?)
             }
         } else {
             None
@@ -572,7 +599,7 @@ impl Parameters {
 
         let machine_friendly = matches.is_present("machine_friendly");
 
-        let mut input_values = vec![];
+        let mut input_values = vec![None; raw_model.inputs.len()];
 
         if let Some(inputs) = matches.values_of("input") {
             for (ix, v) in inputs.enumerate() {
@@ -583,12 +610,7 @@ impl Parameters {
                 } else {
                     raw_model.input_outlets()?[ix]
                 };
-                while input_values.len() < ix {
-                    input_values.push(None);
-                }
-                if let Some(t) = t.value.concretize() {
-                    input_values.push(Some(t));
-                }
+                input_values[ix] = t.value.concretize();
                 for input in raw_model.node(outlet.node).inputs.clone() {
                     raw_model.node_mut(input.node).outputs[input.slot]
                         .successors
@@ -601,7 +623,7 @@ impl Parameters {
                     t.shape.set_dim(s.parse()?, TDim::s());
                 }
                 info!("Input #{}: {:?}", ix, t);
-                raw_model.set_outlet_fact(outlet, t)?;
+                raw_model.set_outlet_fact(outlet, t.without_value())?;
             }
         }
 
@@ -623,23 +645,72 @@ impl Parameters {
                         if let Some(s) = matches.value_of("stream_axis") {
                             fact.shape.set_dim(s.parse()?, TDim::s());
                         }
-                        raw_model.set_input_fact(ix, fact)?;
-                        while input_values.len() <= ix {
-                            input_values.push(None);
-                        }
+                        raw_model.set_input_fact(ix, fact.without_value())?;
                         input_values[ix] = Some(t.into_arc_tensor());
                     }
                 }
             }
         }
 
+        let mut use_onnx_test_case_data_set = |inputs_dir: &std::path::Path| -> CliResult<()> {
+            let files = inputs_dir.read_dir()?.map(|file| {
+                let file = file?;
+                let filename = file
+                    .file_name()
+                    .into_string()
+                    .map_err(|s| format!("Can't convert OSString to String ({:?})", s))?;
+                if filename.starts_with("input_") || filename.starts_with("output_") {
+                    let ix = filename.split("_").nth(1).unwrap().split(".").nth(0).unwrap().parse::<usize>()?;
+                    let (name, tensor) = tensor::for_data(file.path().to_str().unwrap())?;
+                    Ok(Some((ix, filename.starts_with("input_"), filename, name.unwrap(), tensor)))
+                } else {
+                    Ok(None)
+                }
+            }).collect::<CliResult<Vec<Option<_>>>>()?;
+            let files = files.into_iter().filter_map(|x|x).collect::<Vec<_>>();
+            let (inputs, outputs) = files.iter().partition::<Vec<_>, _>(|f| f.1);
+            let inputs = inputs.into_iter().sorted_by_key(|f|f.0).collect::<Vec<_>>();
+            let outputs = outputs.into_iter().sorted_by_key(|f|f.0).collect::<Vec<_>>();
+            let input_names = inputs.iter().map(|i| &*i.3).collect::<Vec<_>>();
+            let output_names = outputs.iter().map(|i| &*i.3).collect::<Vec<_>>();
+            debug!("input_names from files: {:?}", input_names);
+            debug!("output_names from files: {:?}", output_names);
+            raw_model.set_input_names(input_names)?;
+            raw_model.set_output_names(output_names)?;
+            for (ix, _, filename, name, tensor) in inputs.into_iter() {
+                debug!("Using {} as input {} ({}): {:?}", filename, ix, name, tensor);
+                input_values[*ix] = tensor.value.concretize();
+                raw_model.set_input_fact(*ix, tensor.clone().without_value())?;
+            }
+            for (ix, _, filename, name, tensor) in outputs.into_iter() {
+                debug!("Using {} as output {} ({}): {:?}", filename, ix, name, tensor);
+                // fixme use them as assertions
+            }
+            Ok(())
+        };
+
+        if onnx_tc {
+            use_onnx_test_case_data_set(filename.parent().unwrap().join("test_data_set_0").as_path())?
+        }
+
+        if let Some(tc) = matches.value_of("onnx_test_data_set") {
+            use_onnx_test_case_data_set(&std::path::Path::new(tc))?
+        }
+
+        let const_inputs = matches.values_of("const_input").map(|c| c.collect()).unwrap_or(vec![]);
         for i in (0..raw_model.inputs.len()).rev() {
             let input = raw_model.inputs[i];
-            let const_inputs =
-                matches.values_of("const_input").map(|cis| cis.collect()).unwrap_or(vec![]);
             if const_inputs.contains(&raw_model.node_name(input.node)) {
-                let t = raw_model.outlet_fact(input.node.into())?.value.concretize().unwrap();
-                raw_model.node_mut(input.node).op = Box::new(tract_core::ops::konst::Const::new(t));
+                if let Some(v) = input_values[i].take() {
+                    raw_model.node_mut(input.node).op = Box::new(
+                        tract_core::ops::konst::Const::new(v),
+                    );
+                } else {
+                    bail!(
+                        "Don't have value for input {}, can't make it const",
+                        raw_model.node_name(input.node)
+                    );
+                }
                 raw_model.inputs.remove(i);
             }
         }
@@ -680,7 +751,8 @@ impl Parameters {
                     return Ok(Box::new(raw_model) as _);
                 }
                 info_usage("after analyse", probe);
-                #[cfg(feature = "tf")] {
+                #[cfg(feature = "tf")]
+                {
                     if let Some(ext) = tf_model_extensions {
                         info!("Running 'tf-preproc'");
                         raw_model = ext.preproc(raw_model)?;
@@ -769,42 +841,40 @@ impl Parameters {
     }
 }
 
-pub enum ProfilingMode {
-    Regular { max_iters: u64, max_time: std::time::Duration },
-    RegularBenching { max_iters: u64, max_time: std::time::Duration },
+pub struct BenchLimits {
+    max_iters: usize,
+    max_time: std::time::Duration,
 }
 
-impl ProfilingMode {
-    pub fn from_clap(matches: &clap::ArgMatches) -> CliResult<ProfilingMode> {
+impl BenchLimits {
+    pub fn from_clap(matches: &clap::ArgMatches) -> CliResult<BenchLimits> {
         let max_iters =
-            matches.value_of("max_iters").map(u64::from_str).transpose()?.unwrap_or(100_000);
+            matches.value_of("max_iters").map(usize::from_str).transpose()?.unwrap_or(100_000);
         let max_time = matches
             .value_of("max-time")
             .map(u64::from_str)
             .transpose()?
             .map(std::time::Duration::from_millis)
             .unwrap_or(std::time::Duration::from_secs(5));
-        let mode = if matches.is_present("bench") {
-            ProfilingMode::RegularBenching { max_iters, max_time }
-        } else {
-            ProfilingMode::Regular { max_iters, max_time }
-        };
-        Ok(mode)
+        Ok(BenchLimits { max_iters, max_time })
     }
 }
 
-pub fn display_options_from_clap(
+pub fn display_params_from_clap(
     root_matches: &clap::ArgMatches,
     matches: &clap::ArgMatches,
-) -> CliResult<DisplayOptions> {
-    Ok(DisplayOptions {
+) -> CliResult<DisplayParams> {
+    Ok(DisplayParams {
         konst: matches.is_present("const"),
+        cost: matches.is_present("cost"),
+        profile: matches.is_present("profile"),
+        left_column_width: 0,
         invariants: matches.is_present("invariants"),
         quiet: matches.is_present("quiet"),
         natural_order: matches.is_present("natural-order"),
         debug_op: matches.is_present("debug-op"),
-        node_ids: matches.values_of("node_id").map(|id| {
-            id.map(|id| id.split("/").map(|i| i.parse::<usize>().unwrap()).collect()).collect()
+        node_ids: matches.values_of("node_id").map(|values| {
+            values.map(|id| tvec!((id.parse::<usize>().unwrap(), "".to_string()))).collect()
         }),
         node_name: matches.value_of("node_name").map(String::from),
         op_name: matches.value_of("op_name").map(String::from),
@@ -812,6 +882,15 @@ pub fn display_options_from_clap(
         expect_canonic: root_matches.value_of("pass").unwrap_or("declutter") == "declutter"
             && !root_matches.is_present("optimize"),
         outlet_labels: matches.is_present("outlet-labels"),
+        io: if matches.is_present("io-long") {
+            display_params::Io::Long
+        } else if matches.is_present("io-none") {
+            display_params::Io::None
+        } else {
+            display_params::Io::Short
+        },
+        info: matches.is_present("info"),
+        json: matches.is_present("json"),
     })
 }
 
@@ -878,13 +957,25 @@ fn handle(matches: clap::ArgMatches, probe: Option<&Probe>) -> CliResult<()> {
 
     let mut params = Parameters::from_clap(&matches, probe)?;
 
+    let mut need_optimisations = false;
+
     match matches.subcommand() {
+        ("bench", Some(m)) => {
+            need_optimisations = true;
+            bench::handle(&params, &BenchLimits::from_clap(&m)?, probe)
+        }
+
+        ("criterion", _) => {
+            need_optimisations = true;
+            bench::criterion(&params)
+        }
+
         #[cfg(feature = "conform")]
         ("compare", Some(m)) => compare::handle_tensorflow(
             m.is_present("cumulative"),
             m.is_present("resilient"),
             &mut params,
-            display_options_from_clap(&matches, m)?,
+            display_params_from_clap(&matches, m)?,
         ),
         #[cfg(not(feature = "conform"))]
         ("compare", _) => bail!("Need conform feature to be able to run comparison"),
@@ -893,7 +984,7 @@ fn handle(matches: clap::ArgMatches, probe: Option<&Probe>) -> CliResult<()> {
             m.is_present("cumulative"),
             m.value_of("npz").unwrap(),
             &params,
-            display_options_from_clap(&matches, m)?,
+            display_params_from_clap(&matches, m)?,
         ),
 
         #[cfg(feature = "onnx")]
@@ -901,7 +992,7 @@ fn handle(matches: clap::ArgMatches, probe: Option<&Probe>) -> CliResult<()> {
             m.is_present("cumulative"),
             m.value_of("pbdir").unwrap(),
             &params,
-            display_options_from_clap(&matches, m)?,
+            display_params_from_clap(&matches, m)?,
         ),
 
         ("run", Some(m)) => {
@@ -910,49 +1001,50 @@ fn handle(matches: clap::ArgMatches, probe: Option<&Probe>) -> CliResult<()> {
         }
 
         ("optimize-check", Some(m)) => {
-            optimize_check::handle(&params, display_options_from_clap(&matches, m)?)
+            optimize_check::handle(&params, display_params_from_clap(&matches, m)?)
         }
 
         ("stream-check", Some(m)) => {
-            stream_check::handle(&params, display_options_from_clap(&matches, m)?)
-        }
-
-        ("cost", Some(m)) => {
-            crate::cost::handle(&params, display_options_from_clap(&matches, m)?, m)
+            stream_check::handle(&params, &display_params_from_clap(&matches, m)?)
         }
 
         ("", None) => dump::handle(
             &params,
-            display_options_from_clap(&matches, &clap::ArgMatches::default())?,
+            &display_params_from_clap(&matches, &clap::ArgMatches::default())?,
+            &clap::ArgMatches::default(),
+            &BenchLimits::from_clap(&clap::ArgMatches::default())?,
             vec![],
         ),
 
         ("dump", Some(m)) => {
             params.assertions = Some(Assertions::from_clap(m, &*params.output_names)?);
+            need_optimisations = m.is_present("profile");
             let inner = m
                 .values_of("inner")
                 .map(|ss| ss.map(|s| s.to_string()).collect())
                 .unwrap_or(vec![]);
-            dump::handle(&params, display_options_from_clap(&matches, m)?, inner)
-        }
-
-        ("profile", Some(m)) => {
-            if !matches.is_present("optimize") {
-                warn!("Profiling un-optimized network. Consider adding -O.");
-            }
-            if cfg!(debug_assertions) {
-                warn!("Profiling a debug build of tract!");
-            }
-            profile::handle(
+            dump::handle(
                 &params,
-                ProfilingMode::from_clap(&m)?,
-                display_options_from_clap(&matches, m)?,
-                probe,
+                &display_params_from_clap(&matches, m)?,
+                m,
+                &BenchLimits::from_clap(&m)?,
+                inner,
             )
         }
 
         (s, _) => bail!("Unknown subcommand {}.", s),
     }?;
+
+    if need_optimisations {
+        let style = ansi_term::Style::new().fg(ansi_term::Color::Red).bold();
+        if !matches.is_present("optimize") {
+            warn!("{}", style.paint("Profiling an un-optimized network. Consider adding -O."));
+        }
+        if cfg!(debug_assertions) {
+            warn!("{}", style.paint("Profiling a debug build of tract!"));
+        }
+    }
+
     if let Some(e) = params.analyse_error {
         Err(e)?
     }

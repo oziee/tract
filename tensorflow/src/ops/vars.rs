@@ -66,7 +66,7 @@ tract_linalg::impl_dyn_hash!(VariableV2);
 
 impl Op for VariableV2 {
     fn name(&self) -> Cow<str> {
-        "tf.VariableV2".into()
+        "VariableV2".into()
     }
 
     fn info(&self) -> TractResult<Vec<String>> {
@@ -77,6 +77,7 @@ impl Op for VariableV2 {
         }
     }
 
+    op_tf!();
     op_as_typed_op!();
 }
 
@@ -136,9 +137,10 @@ tract_linalg::impl_dyn_hash!(Assign);
 
 impl Op for Assign {
     fn name(&self) -> Cow<str> {
-        "tf.Assign".into()
+        "Assign".into()
     }
 
+    op_tf!();
     op_as_typed_op!();
 }
 
@@ -206,57 +208,5 @@ impl TypedOp for Assign {
             bail!("Invalid assignement {:?}", inputs);
         }
         Ok(tvec!(inputs[0].clone()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn var_assign() {
-        let mut model = InferenceModel::default();
-
-        let var = model
-            .add_node(
-                "var",
-                VariableV2::new(None, None, "var".into(), "xxx".into(), tvec![], f32::datum_type(), Some(rctensor0(-1.0f32))),
-                tvec!(InferenceFact::default()),
-            )
-            .unwrap();
-        let zero = model.add_const("zero".to_string(), tensor0(0f32)).unwrap();
-        let one = model.add_const("one".to_string(), tensor0(1f32)).unwrap();
-        let reset = model
-            .add_node("reset", Assign::new(Some("xxx".into())), tvec!(InferenceFact::new()))
-            .unwrap();
-        model.add_edge(OutletId::new(var, 0), InletId::new(reset, 0)).unwrap();
-        model.add_edge(zero, InletId::new(reset, 1)).unwrap();
-        let set = model
-            .add_node("set", Assign::new(Some("xxx".into())), tvec!(InferenceFact::new()))
-            .unwrap();
-        model.add_edge(OutletId::new(var, 0), InletId::new(set, 0)).unwrap();
-        model.add_edge(one, InletId::new(set, 1)).unwrap();
-        model.auto_outputs().unwrap();
-        let model = model.into_typed().unwrap();
-        let model = std::rc::Rc::new(model);
-        let var = model.node_id_by_name("var").unwrap();
-        let plan_read = SimplePlan::new_for_output(model.clone(), OutletId::new(var, 0)).unwrap();
-        let set = model.node_id_by_name("set").unwrap();
-        let plan_set = SimplePlan::new_for_output(model.clone(), OutletId::new(set, 0)).unwrap();
-        let reset = model.node_id_by_name("reset").unwrap();
-        let plan_reset =
-            SimplePlan::new_for_output(model.clone(), OutletId::new(reset, 0)).unwrap();
-        let mut state = SimpleState::new_multiplan(vec![plan_read, plan_set, plan_reset]).unwrap();
-
-        let read = state.run_plan(tvec!(), 0).unwrap(); // read
-        assert_eq!(read, tvec!(Tensor::from(-1.0f32).into()));
-        let read = state.run_plan(tvec!(), 1).unwrap(); // set
-        assert_eq!(read, tvec!(Tensor::from(1.0f32).into()));
-        let read = state.run_plan(tvec!(), 0).unwrap(); // read
-        assert_eq!(read, tvec!(Tensor::from(1.0f32).into()));
-        let read = state.run_plan(tvec!(), 2).unwrap(); // reset
-        assert_eq!(read, tvec!(Tensor::from(0.0f32).into()));
-        let read = state.run_plan(tvec!(), 0).unwrap(); // read
-        assert_eq!(read, tvec!(Tensor::from(0.0f32).into()));
     }
 }

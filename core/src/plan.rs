@@ -100,36 +100,11 @@ where
     M: Borrow<ModelImpl<F, O>> + Hash,
     P: Borrow<SimplePlan<F, O, M>>,
 {
-    plans: Vec<P>,
+    plan: P,
     pub states: Vec<Option<Box<dyn OpState>>>,
     pub session_state: SessionState,
     pub values: Vec<Option<TVec<Arc<Tensor>>>>,
     _phantom: PhantomData<(M, F, O)>,
-}
-
-impl<F, O, M, P> Clone for SimpleState<F, O, M, P>
-where
-    F: Fact + Hash + Clone + 'static,
-    O: Debug + Display + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static + Hash,
-    M: Borrow<ModelImpl<F, O>> + Hash,
-    P: Borrow<SimplePlan<F, O, M>> + Clone,
-{
-    fn clone(&self) -> SimpleState<F, O, M, P> {
-        let states = self
-            .states
-            .iter()
-            .map(|opt: &Option<Box<dyn OpState>>| -> Option<Box<dyn OpState>> {
-                opt.as_ref().map(|b| ::dyn_clone::clone_box(&**b))
-            })
-            .collect();
-        SimpleState {
-            plans: self.plans.clone(),
-            states,
-            session_state: SessionState::default(),
-            values: self.values.clone(),
-            _phantom: PhantomData,
-        }
-    }
 }
 
 impl<F, O, M, P> SimpleState<F, O, M, P>
@@ -140,19 +115,15 @@ where
     P: Borrow<SimplePlan<F, O, M>> + Clone,
 {
     pub fn new(plan: P) -> TractResult<SimpleState<F, O, M, P>> {
-        Self::new_multiplan(vec![plan])
-    }
-
-    pub fn new_multiplan(plans: Vec<P>) -> TractResult<SimpleState<F, O, M, P>> {
-        let values = vec![None; plans[0].borrow().model.borrow().nodes().len()];
+        let values = vec![None; plan.borrow().model.borrow().nodes().len()];
         let mut session = SessionState::default();
-        let model = plans[0].borrow().model();
+        let model = plan.borrow().model();
         let states = model
             .nodes()
             .iter()
             .map(|n: &BaseNode<F, O>| n.op().state(&mut session, n.id))
             .collect::<TractResult<_>>()?;
-        Ok(SimpleState { plans, states, session_state: session, values, _phantom: PhantomData })
+        Ok(SimpleState { plan, states, session_state: session, values, _phantom: PhantomData })
     }
 
     /// Reset wires state.
@@ -163,8 +134,8 @@ where
 
     /// Reset wires state.
     pub fn reset_op_states(&mut self) -> TractResult<()> {
-        let &mut SimpleState { ref plans, ref mut session_state, ref mut states, .. } = self;
-        *states = plans[0]
+        let &mut SimpleState { ref plan, ref mut session_state, ref mut states, .. } = self;
+        *states = plan
             .borrow()
             .model()
             .nodes()
@@ -175,21 +146,12 @@ where
     }
 
     pub fn run(&mut self, inputs: TVec<Tensor>) -> TractResult<TVec<Arc<Tensor>>> {
-        self.run_plan(inputs, 0)
-    }
-
-    pub fn run_plan(
-        &mut self,
-        inputs: TVec<Tensor>,
-        plan: usize,
-    ) -> TractResult<TVec<Arc<Tensor>>> {
-        self.run_plan_with_eval(inputs, plan, self::eval)
+        self.run_plan_with_eval(inputs, self::eval)
     }
 
     pub fn run_plan_with_eval<Eval>(
         &mut self,
         inputs: TVec<Tensor>,
-        plan: usize,
         mut eval: Eval,
     ) -> TractResult<TVec<Arc<Tensor>>>
     where
@@ -204,13 +166,13 @@ where
         {
             self.set_inputs(inputs)?;
             let &mut SimpleState {
-                ref plans,
+                ref plan,
                 ref mut session_state,
                 ref mut states,
                 ref mut values,
                 ..
             } = self;
-            let plan = plans[plan].borrow();
+            let plan = plan.borrow();
             let model = plan.model().borrow();
             for (step, n) in plan.order.iter().enumerate() {
                 let node = model.node(*n);
@@ -294,33 +256,34 @@ where
     }
 
     pub fn set_inputs(&mut self, inputs: TVec<Tensor>) -> TractResult<()> {
-        let SimpleState { ref plans, ref mut session_state, .. } = self;
-        plans[0].borrow().model().input_outlets()?.iter().zip(inputs).for_each(|(input, t)| {
-            session_state.inputs.insert(input.node, t.into());
-        });
+        for (ix, t) in inputs.into_iter().enumerate() {
+            self.set_input(ix, t)?
+        }
         Ok(())
     }
 
     pub fn set_input(&mut self, input: usize, t: Tensor) -> TractResult<()> {
-        let id = self
+        let outlet: OutletId = *self
             .model()
             .input_outlets()?
             .get(input)
-            .ok_or_else(|| format!("Invalid input id for model ({}).", input))?
-            .node;
-        self.session_state.inputs.insert(id, t.into());
+            .ok_or_else(|| format!("Invalid input id for model ({}).", input))?;
+        self.plan
+            .borrow()
+            .model()
+            .outlet_fact(outlet)?
+            .matches(&t)
+            .chain_err(|| format!("Setting input {}", input))?;
+        self.session_state.inputs.insert(outlet.node, t.into());
         Ok(())
     }
 
     pub fn take_outputs(&mut self) -> TractResult<Vec<Arc<Tensor>>> {
-        let SimpleState { ref plans, ref mut values, .. } = self;
+        let SimpleState { ref plan, ref mut values, .. } = self;
         let mut v = vec![];
-        for o in plans[0].borrow().model().output_outlets()?.iter() {
+        for o in plan.borrow().model().output_outlets()?.iter() {
             let vs = values[o.node].as_mut().ok_or_else(|| {
-                format!(
-                    "Outputs of {:?} are not computed",
-                    &plans[0].borrow().model().nodes()[o.node]
-                )
+                format!("Outputs of {:?} are not computed", &plan.borrow().model().nodes()[o.node])
             })?;
             v.push(vs[o.slot].clone())
         }
@@ -337,8 +300,8 @@ where
     }
 
     pub fn prepare_inputs(&self, node: usize) -> TractResult<TVec<Arc<Tensor>>> {
-        let SimpleState { ref plans, ref values, .. } = self;
-        let plan = plans[0].borrow();
+        let SimpleState { ref plan, ref values, .. } = self;
+        let plan = plan.borrow();
         let nodes = plan.model().nodes();
         let node = &nodes[node];
         let mut inputs: TVec<Arc<Tensor>> = tvec![];
@@ -362,8 +325,8 @@ where
         node: usize,
         inputs: TVec<Arc<Tensor>>,
     ) -> TractResult<()> {
-        let SimpleState { ref plans, ref mut session_state, ref mut values, .. } = self;
-        let plan = plans[0].borrow();
+        let SimpleState { ref plan, ref mut session_state, ref mut values, .. } = self;
+        let plan = plan.borrow();
         let nodes = plan.model().nodes();
         let node = &nodes[node];
         let vs = match self.states[node.id] {
@@ -391,11 +354,11 @@ where
                     inputs.push(self.values[i.node].as_ref().unwrap()[i.slot].clone().into())
                 }
             }
-            let Self { ref mut states, ref mut session_state, ref plans, .. } = self;
-            let plan = plans[0].borrow();
+            let Self { ref mut states, ref mut session_state, ref plan, .. } = self;
+            let plan = plan.borrow();
             match states[node] {
                 Some(ref mut state) => {
-                    state.eval(session_state, plans[0].borrow().model().nodes()[node].op(), inputs)
+                    state.eval(session_state, plan.borrow().model().nodes()[node].op(), inputs)
                 }
                 None => {
                     plan.borrow().model().nodes()[node].op().as_stateless().unwrap().eval(inputs)
@@ -422,7 +385,7 @@ where
     }
 
     pub fn plan(&self) -> &SimplePlan<F, O, M> {
-        &self.plans[0].borrow()
+        &self.plan.borrow()
     }
 
     pub fn model(&self) -> &ModelImpl<F, O> {
@@ -440,9 +403,11 @@ where
     F: Fact + Hash + Clone + 'static,
     O: Debug + Display + AsRef<dyn Op> + AsMut<dyn Op> + Clone + 'static + Hash,
 {
-    match state {
+    let r = match state {
         Some(ref mut state) => state.eval(session_state, node.op(), input),
         None => node.op().as_stateless().expect("as_stateless").eval(input),
     }
-    .chain_err(|| format!("Evaluating {}", node))
+    .chain_err(|| format!("Evaluating {}", node));
+    // println!("{} {:?}", node, r);
+    r
 }

@@ -3,6 +3,7 @@
 use proptest::prelude::*;
 
 use tract_ndarray::prelude::*;
+use tract_hir::internal::*;
 use tract_onnx::prelude::*;
 use tract_onnx::tract_hir;
 
@@ -54,7 +55,7 @@ impl LstmProblem {
         let b = model.add_const("b", b_iofc)?;
         let h0 = model.add_const("h0", self.h0.clone().insert_axis(Axis(0)))?;
         let c0 = model.add_const("c0", self.c0.clone().insert_axis(Axis(0)))?;
-        let lstm = model.wire_node("lstm", op, &[x, w, r, b, h0, c0]).unwrap();
+        let lstm = model.wire_node("lstm", expand(op), &[x, w, r, b, h0, c0]).unwrap();
         model.set_output_outlets(&lstm).unwrap();
         model.analyse(false)?;
         Ok(model.into_typed()?)
@@ -162,12 +163,15 @@ impl LstmProblem {
             &[cs, cs0],
         )?[0];
 
-        let _init =
-            model.wire_node("init", ::tract_tensorflow::ops::Noop::new(), &[a_h0, a_cs0])?;
+        let init = model.wire_node("init", ::tract_tensorflow::ops::Noop::new(), &[a_h0, a_cs0])?;
 
-        model.set_output_names(&["lstm", "init", "memo"])?;
+        model.set_output_names(&["lstm", "memo"])?;
+        let extensions = tract_tensorflow::model::TfModelExtensions {
+            control_inputs: vec!(),
+            initializing_nodes: vec!(init[0].node),
+        };
+        let model = extensions.preproc(model)?;
 
-        model.analyse(false)?;
         // println!("{:#?}", model);
         Ok(model.into_typed()?)
     }
@@ -187,17 +191,14 @@ impl LstmProblem {
 
     pub fn tf_run(&self) -> TractResult<Arc<Tensor>> {
         let model = self.tf_model()?;
-        let init_id = model.node_by_name("init")?.id;
         let lstm_id = model.node_by_name("lstm")?.id;
         let memo_id = model.node_by_name("memo")?.id;
-        let plan_init = SimplePlan::new_for_output(&model, OutletId::new(init_id, 0))?;
         let plan_run = SimplePlan::new_for_outputs(
             &model,
             &[OutletId::new(lstm_id, 6), OutletId::new(memo_id, 0)],
         )?;
-        let mut state = SimpleState::new_multiplan(vec![plan_init, plan_run])?;
-        state.run_plan(tvec!(), 0)?;
-        let y = state.run_plan(tvec!(self.x.clone().into_tensor()), 1)?.remove(0);
+        let mut state = SimpleState::new(plan_run)?;
+        let y = state.run(tvec!(self.x.clone().into_tensor()))?.remove(0);
         Ok(y)
     }
 }
@@ -332,4 +333,3 @@ fn test_w() {
     let t = pb.tf_run().unwrap();
     assert_eq!(o, t)
 }
-

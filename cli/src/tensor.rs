@@ -6,6 +6,9 @@ use crate::CliResult;
 use tract_hir::internal::*;
 
 pub fn parse_spec(size: &str) -> CliResult<InferenceFact> {
+    if size.len() == 0 {
+        return Ok(InferenceFact::default())
+    }
     let splits = size.split("x").collect::<Vec<_>>();
 
     if splits.len() < 1 {
@@ -31,7 +34,11 @@ pub fn parse_spec(size: &str) -> CliResult<InferenceFact> {
         shape
             .iter()
             .map(|&s| {
-                Ok(if s == "_" { GenericFactoid::Any } else { GenericFactoid::Only(s.parse()?) })
+                Ok(if s == "_" {
+                    GenericFactoid::Any
+                } else {
+                    GenericFactoid::Only(s.parse()?)
+                })
             })
             .collect::<TractResult<TVec<DimFact>>>()?,
     );
@@ -74,7 +81,7 @@ fn tensor_for_text_data(filename: &str) -> CliResult<Tensor> {
 }
 
 /// Parses the `data` command-line argument.
-fn for_data(filename: &str) -> CliResult<(Option<String>, InferenceFact)> {
+pub fn for_data(filename: &str) -> CliResult<(Option<String>, InferenceFact)> {
     #[allow(unused_imports)]
     use std::convert::TryFrom;
     if filename.ends_with(".pb") {
@@ -155,6 +162,16 @@ pub fn for_string(value: &str) -> CliResult<(Option<String>, InferenceFact)> {
 
 pub fn make_inputs(values: &[impl std::borrow::Borrow<TypedFact>]) -> CliResult<TVec<Tensor>> {
     values.iter().map(|v| tensor_for_fact(v.borrow(), None)).collect()
+}
+
+pub fn make_inputs_for_model(model: &dyn Model) -> CliResult<TVec<Tensor>> {
+    Ok(make_inputs(
+        &*model
+            .input_outlets()
+            .iter()
+            .map(|&t| model.outlet_typedfact(t))
+            .collect::<TractResult<Vec<TypedFact>>>()?,
+    )?)
 }
 
 pub fn tensor_for_fact(fact: &TypedFact, streaming_dim: Option<usize>) -> CliResult<Tensor> {

@@ -44,7 +44,7 @@ impl tract_linalg::hash::SloppyHash for Blob {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 #[cfg_attr(feature = "serialize", derive(Serialize))]
 pub enum DatumType {
     Bool,
@@ -240,6 +240,8 @@ try_into!(i64, f32);
 try_into!(u8, f32);
 try_into!(u16, f32);
 
+try_into!(u8, i64);
+
 try_into!(u8, i32);
 try_into!(u16, i32);
 
@@ -319,6 +321,27 @@ impl TryInto<f64> for bool {
         }
     }
 }
+
+macro_rules! cast_to_and_from_bool {
+    ($t: ty) => {
+        impl TryInto<bool> for $t {
+            fn try_into(&self) -> TractResult<bool> {
+                Ok(*self != 0)
+            }
+        }
+
+        impl TryInto<$t> for bool {
+            fn try_into(&self) -> TractResult<$t> {
+                Ok(*self as usize as _)
+            }
+        }
+    }
+}
+cast_to_and_from_bool!(i8);
+cast_to_and_from_bool!(i16);
+cast_to_and_from_bool!(i32);
+cast_to_and_from_bool!(i64);
+
 
 impl TryInto<f32> for f16 {
     fn try_into(&self) -> TractResult<f32> {
@@ -402,5 +425,11 @@ mod tests {
     fn test_cast_i32_to_dim() {
         let t_i32: Tensor = tensor1(&[0i32, 0]);
         t_i32.cast_to::<TDim>().unwrap();
+    }
+
+    #[test]
+    fn test_cast_i64_to_bool() {
+        let t_i64: Tensor = tensor1(&[0i64]);
+        t_i64.cast_to::<bool>().unwrap();
     }
 }

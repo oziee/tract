@@ -24,7 +24,7 @@ where
     /// model outputs
     pub outputs: Vec<OutletId>,
     /// outlet labels
-    #[educe(Hash(method="hash_outlet_labels"))]
+    #[educe(Hash(method = "hash_outlet_labels"))]
     pub outlet_labels: HashMap<OutletId, String>,
 }
 
@@ -117,6 +117,12 @@ where
         Ok(())
     }
 
+    /// Change model inputs and return `self`.
+    pub fn with_input_outlets(mut self, inputs: &[OutletId]) -> TractResult<Self> {
+        self.set_input_outlets(inputs)?;
+        Ok(self)
+    }
+
     /// Set model inputs by the node name.
     pub fn set_input_names(
         &mut self,
@@ -131,6 +137,15 @@ where
         }
         self.inputs = ids;
         Ok(())
+    }
+
+    /// Set model inputs by the node name and return `self`.
+    pub fn with_input_names(
+        mut self,
+        inputs: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> TractResult<Self> {
+        self.set_input_names(inputs)?;
+        Ok(self)
     }
 
     /// Get the `ix`-th input tensor type information.
@@ -149,6 +164,12 @@ where
     pub fn set_input_fact(&mut self, input: usize, fact: F) -> TractResult<()> {
         let outlet = self.inputs[input];
         self.set_outlet_fact(outlet, fact)
+    }
+
+    /// Set the `ix`-th input tensor type information and return `self`.
+    pub fn with_input_fact(mut self, input: usize, fact: F) -> TractResult<Self> {
+        self.set_input_fact(input, fact)?;
+        Ok(self)
     }
 
     // Outputs
@@ -181,17 +202,40 @@ where
         Ok(())
     }
 
+    /// Change model outputs and return `self`.
+    pub fn with_output_outlets(mut self, outputs: &[OutletId]) -> TractResult<Self> {
+        self.set_output_outlets(outputs)?;
+        Ok(self)
+    }
+
     /// Set model outputs by node names.
     pub fn set_output_names(
         &mut self,
         outputs: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> TractResult<()> {
+        let labels: HashMap<&str, OutletId> =
+            self.outlet_labels.iter().map(|(o, s)| (&**s, *o)).collect();
         let ids: Vec<OutletId> = outputs
             .into_iter()
-            .map(|s| self.node_by_name(s.as_ref()).map(|n| OutletId::new(n.id, 0)))
+            .map(|s| {
+                labels
+                    .get(s.as_ref())
+                    .cloned()
+                    .or_else(|| self.nodes_by_name.get(s.as_ref()).map(|&n| n.into()))
+                    .ok_or_else(|| format!("Node {} not found", s.as_ref()).into())
+            })
             .collect::<TractResult<_>>()?;
         self.outputs = ids;
         Ok(())
+    }
+
+    /// Set model outputs by node names and return `self`.
+    pub fn with_output_names(
+        mut self,
+        outputs: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> TractResult<Self> {
+        self.set_output_names(outputs)?;
+        Ok(self)
     }
 
     /// Get the `ix`-th input tensor type information.
@@ -210,6 +254,12 @@ where
     pub fn set_output_fact(&mut self, output: usize, fact: F) -> TractResult<()> {
         let outlet = self.outputs[output];
         self.set_outlet_fact(outlet, fact)
+    }
+
+    /// Set the `ix`-th output tensor type information and return `self`.
+    pub fn with_output_fact(mut self, output: usize, fact: F) -> TractResult<Self> {
+        self.set_output_fact(output, fact)?;
+        Ok(self)
     }
 
     // nodes and their facts
@@ -314,6 +364,12 @@ where
         Ok(())
     }
 
+    /// Set tensor information for a single outlet and return `self`.
+    pub fn with_outlet_fact(mut self, outlet: OutletId, fact: F) -> TractResult<Self> {
+        self.set_outlet_fact(outlet, fact)?;
+        Ok(self)
+    }
+
     // outlet labels
 
     /// Get label for an outlet.
@@ -322,8 +378,15 @@ where
     }
 
     /// Set label for an outlet.
-    pub fn set_outlet_label(&mut self, outlet: OutletId, label: String) {
+    pub fn set_outlet_label(&mut self, outlet: OutletId, label: String) -> TractResult<()> {
         self.outlet_labels.insert(outlet, label);
+        Ok(())
+    }
+
+    /// Set label for an outlet and return `self`.
+    pub fn with_outlet_label(mut self, outlet: OutletId, label: String) -> TractResult<Self> {
+        self.set_outlet_label(outlet, label)?;
+        Ok(self)
     }
 
     /// Find outlet by label.
@@ -367,6 +430,11 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Converts the model into a `RunnableModel` which fixes the inputs and outputs and allows passing data through the model.
+    pub fn into_runnable(self) -> TractResult<RunnableModel<F, O, Self>> {
+        SimplePlan::new(self)
     }
 }
 
@@ -446,6 +514,10 @@ where
     fn outlet_successors(&self, outlet: OutletId) -> &[InletId] {
         &self.nodes[outlet.node].outputs[outlet.slot].successors
     }
+
+    fn nested_models(&self, node: usize) -> Vec<(Cow<str>, &dyn Model, Vec<String>, Vec<String>)> {
+        self.node(node).op().nested_models()
+    }
 }
 
 impl<F, O> fmt::Display for ModelImpl<F, O>
@@ -487,17 +559,21 @@ where
                     self.node_inputs(i).iter().map(|s| format!("{:?}", s)).join(", ")
                 )?;
             }
-            if self.node_output_count(i) > 1 || self.outlet_successors((i, 0).into()).len() > 2 {
+            if self.node_output_count(i) > 1
+                || self.outlet_successors((i, 0).into()).len() > 2
+                || self.outlet_label(i.into()).is_some()
+            {
                 for o in 0..self.node_output_count(i) {
-                    if self.outlet_successors((i,o).into()).len() > 0 {
+                    if self.outlet_successors((i, o).into()).len() > 0 {
                         writeln!(
                             fmt,
-                            "                                                |   * output #{}: {}",
+                            "                                                |   * output #{}: {} {}",
                             o,
+                            self.outlet_label((i, o).into()).unwrap_or(""),
                             self.outlet_successors((i, o).into())
                                 .iter()
                                 .map(|s| format!("{:?}", s))
-                                .join(", ")
+                                .join(", "),
                         )?;
                     }
                 }
@@ -514,7 +590,9 @@ mod test {
     #[test]
     fn hashable() {
         let mut model = TypedModel::default();
-        let _s = model.add_source("source", TypedFact::dt_shape(DatumType::F32, [1,2,3].as_ref()).unwrap()).unwrap();
+        let _s = model
+            .add_source("source", TypedFact::dt_shape(DatumType::F32, [1, 2, 3].as_ref()).unwrap())
+            .unwrap();
         let mut hasher = std::collections::hash_map::DefaultHasher::default();
         model.hash(&mut hasher);
     }

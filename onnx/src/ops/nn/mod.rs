@@ -18,7 +18,7 @@ fn reduce(
 ) -> TractResult<(Box<dyn InferenceOp>, Vec<String>)> {
     let axes = node.get_attr_opt_vec("axes")?;
     let keep_dims = node.get_attr_opt("keepdims")?.unwrap_or(1i64) == 1;
-    Ok((Box::new(ops::nn::Reduce::new(axes, keep_dims, reducer)), vec![]))
+    Ok((expand(ops::nn::Reduce::new(axes, keep_dims, reducer)), vec![]))
 }
 
 pub fn register_all_ops(reg: &mut OnnxOpRegister) {
@@ -117,7 +117,7 @@ pub fn batch_normalization(
     if spatial != 0 {
         bail!("BatchNormalization: attribute 'spatial' is not supported (deprecated by ONNX operator set 9)")
     }
-    Ok((Box::new(batch_norm::BatchNorm::new(nn::DataFormat::NCHW, epsilon, spatial != 0)), vec![]))
+    Ok((expand(batch_norm::BatchNorm::new(nn::DataFormat::NCHW, epsilon, spatial != 0)), vec![]))
 }
 
 fn common_conv(node: &NodeProto) -> TractResult<cnn::Conv> {
@@ -179,7 +179,6 @@ pub fn conv_qlinear(
     if node.input.len() == 9 {
         op.bias_input = Some(8);
     }
-    op.override_bias_datum_type = Some(i32::datum_type());
     Ok((Box::new(op), vec![]))
 }
 

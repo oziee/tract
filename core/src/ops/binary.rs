@@ -3,7 +3,9 @@ use crate::ops::invariants::*;
 use downcast_rs::Downcast;
 use std::fmt;
 
-pub trait BinMiniOp: fmt::Debug + dyn_clone::DynClone + Send + Sync + 'static + Downcast + DynHash {
+pub trait BinMiniOp:
+    fmt::Debug + dyn_clone::DynClone + Send + Sync + 'static + Downcast + DynHash
+{
     fn name(&self) -> &'static str;
     fn validation(&self) -> Validation {
         Validation::Accurate
@@ -72,18 +74,20 @@ impl Hash for Box<dyn BinMiniOp> {
     }
 }
 
+// FIXME: should move to hir ?
 #[derive(Debug, Clone, Hash)]
 pub struct InferenceBinOp(pub Box<dyn BinMiniOp>);
 
 impl Op for InferenceBinOp {
     fn name(&self) -> Cow<str> {
-        format!("{}Inference", self.0.name()).into()
+        self.0.name().into()
     }
 
     fn validation(&self) -> Validation {
         self.0.validation()
     }
 
+    op_core!();
     not_a_typed_op!();
     not_a_pulsed_op!();
 }
@@ -102,7 +106,7 @@ tract_linalg::impl_dyn_hash!(TypedBinOp);
 
 impl Op for TypedBinOp {
     fn name(&self) -> Cow<str> {
-        format!("{}TypedBinOp", self.0.name()).into()
+        self.0.name().into()
     }
 
     fn validation(&self) -> Validation {
@@ -110,6 +114,7 @@ impl Op for TypedBinOp {
     }
 
     canonic!();
+    op_core_mir!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }
@@ -128,7 +133,10 @@ impl TypedOp for TypedBinOp {
                 &inputs[0].shape.to_tvec(),
                 &inputs[1].shape.to_tvec()
             ])
-            .ok_or_else(|| format!("Can not broadcast shapes a:{:?} b:{:?}", &inputs[0], &inputs[1]))?
+            .ok_or_else(|| format!(
+                "Can not broadcast shapes a:{:?} b:{:?}",
+                &inputs[0], &inputs[1]
+            ))?
         )?))
     }
 
@@ -274,7 +282,7 @@ fn pulsify_bin(
         if fact.delay < delay {
             let add_delay = delay - fact.delay;
             input = target.wire_node(
-                format!("{}/Delay", &*node.name),
+                format!("{}.Delay", &*node.name),
                 Delay::new(&fact, add_delay, 0),
                 &[input],
             )?[0];
@@ -293,7 +301,7 @@ tract_linalg::impl_dyn_hash!(UnaryOp);
 
 impl Op for UnaryOp {
     fn name(&self) -> Cow<str> {
-        format!("{}Unary", self.mini_op.name()).into()
+        self.mini_op.name().into()
     }
 
     fn info(&self) -> TractResult<Vec<String>> {
@@ -305,12 +313,20 @@ impl Op for UnaryOp {
     }
 
     canonic!();
+    op_core_lir_mir!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }
 
 impl StatelessOp for UnaryOp {
     fn eval(&self, inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
+        if self.a.rank() != inputs[0].rank() {
+            bail!(
+                "Const and input must have the same rank ({} vs {})",
+                self.a.rank(),
+                inputs[0].rank()
+            );
+        }
         debug_assert_eq!(self.a.rank(), inputs[0].rank());
         self.mini_op.eval_broadcast(tvec!(self.a.clone(), inputs[0].clone()))
     }
@@ -377,7 +393,7 @@ impl TypedOp for UnaryOp {
         };
         Ok(Some(
             patch.wire_node(
-                format!("{}-sliced-{}-{}", node.name, start, end),
+                format!("{}.sliced-{}-{}", node.name, start, end),
                 UnaryOp::new(self.mini_op.clone(), a),
                 &[wire],
             )?[0],
@@ -450,7 +466,7 @@ tract_linalg::impl_dyn_hash!(MergeOp);
 
 impl Op for MergeOp {
     fn name(&self) -> Cow<str> {
-        format!("{}Merge", self.0.name()).into()
+        self.0.name().into()
     }
 
     fn validation(&self) -> Validation {
@@ -458,6 +474,7 @@ impl Op for MergeOp {
     }
 
     canonic!();
+    op_core_lir_mir!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }
@@ -616,9 +633,10 @@ tract_linalg::impl_dyn_hash!(MergeOpUnicast);
 
 impl Op for MergeOpUnicast {
     fn name(&self) -> Cow<str> {
-        format!("{}MergeUnicast", self.0.name()).into()
+        self.0.name().into()
     }
 
+    op_core_lir_mir!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }

@@ -45,7 +45,7 @@ pub enum Validation {
     Accurate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum Cost {
     Div(DatumType),
     FMA(DatumType),
@@ -54,7 +54,7 @@ pub enum Cost {
 
 use crate::internal::*;
 
-pub trait OpState: fmt::Debug + Send + dyn_clone::DynClone {
+pub trait OpState: fmt::Debug + Send {
     fn eval(
         &mut self,
         session: &mut SessionState,
@@ -97,6 +97,10 @@ impl<O: StatelessOp + Clone> StatefullOp for O {
 pub trait Op:
     fmt::Debug + dyn_clone::DynClone + Send + Sync + 'static + Downcast + StatefullOp + DynHash
 {
+    /// Vector of short strings defining what families the op belongs too.
+    /// tract-core defines "core", "mir", "lir".
+    fn op_families(&self) -> &'static [ &'static str ];
+
     fn name(&self) -> Cow<str>;
 
     /// Nested models, with label (for audit).
@@ -257,7 +261,7 @@ pub trait TypedOp:
 
     /// Nested model multipliers, with label (for profiling).
     #[allow(unused_variables)]
-    fn nested_model_multipliers(&self, inputs: &[&TypedFact]) -> Vec<(Cow<str>, f32)> {
+    fn nested_model_multipliers(&self, inputs: &[&TypedFact]) -> Vec<(Cow<str>, f64)> {
         vec![]
     }
 }

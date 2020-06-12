@@ -43,6 +43,7 @@ where
         other.downcast_ref::<Self>().map(|other| other == self).unwrap_or(false)
     }
 
+    op_core_lir!();
     op_as_typed_op!();
     not_a_pulsed_op!();
 }
@@ -125,7 +126,11 @@ where
     TI: Datum + Copy + Add + Mul + Zero + fmt::Debug,
 {
     fn name(&self) -> Cow<str> {
-        "MatMatMulUnaryFinite".into()
+        if self.mmm.as_mmm().n() == 1 {
+            "MatVecMul"
+        } else {
+            "MatMatMul"
+        }.into()
     }
 
     fn info(&self) -> TractResult<Vec<String>> {
@@ -144,6 +149,7 @@ where
         Ok(infos)
     }
 
+    op_core_lir!();
     op_as_typed_op!();
     not_a_pulsed_op!();
 }
@@ -271,7 +277,10 @@ where
                 let mut new_op = self.clone();
                 new_op
                     .fused_ops
-                    .get_or_insert_with(|| arr0(vec![]).into_dyn())
+                    .get_or_insert_with(|| {
+                        let shape = vec!(1; self.c_prefix_dim_and_stride.as_ref().map(|c| c.0.len()).unwrap_or(0));
+                        ArrayD::from_shape_fn(shape, |_| vec!())
+                    })
                     .map_inplace(|v| v.extend(op.iter().cloned()));
                 return Ok(Some(TypedModelPatch::fuse_with_next(model, &node, new_op)?));
             }

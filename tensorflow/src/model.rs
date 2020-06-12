@@ -85,8 +85,10 @@ impl Tensorflow {
     }
 
     pub fn read_frozen_from_path(&self, p: impl AsRef<path::Path>) -> TractResult<GraphDef> {
-        let f = fs::File::open(p)?;
-        let map = unsafe { memmap::Mmap::map(&f)? };
+        #[cfg(not(target_arch = "wasm32"))]
+        let map = unsafe { memmap::Mmap::map(&fs::File::open(p)?)? };
+        #[cfg(target_arch = "wasm32")]
+        let map = fs::read(p)?;
         Ok(GraphDef::decode(&*map).map_err(|e| format!("{:?}", e))?)
     }
 
@@ -190,7 +192,7 @@ impl Tensorflow {
                 let outlet = OutletId::new(prec, input.1);
                 let inlet = InletId::new(node_id, ix);
                 model.add_edge(outlet, inlet)?;
-                model.set_outlet_label(outlet, i.to_string());
+                model.set_outlet_label(outlet, i.to_string())?;
             }
             for i in pbnode.input.iter().filter(|n| n.starts_with("^")) {
                 let input = Self::parse_input(i)?;

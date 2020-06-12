@@ -1,24 +1,27 @@
-use super::codegen::{Codegen, CodegenOpParams};
+use super::lir::{LirScan, LirScanOpParams};
 
 use super::*;
 
 #[derive(Debug, Clone, Default, Hash)]
-pub struct TypedScan {
+pub struct Scan {
     pub skip: usize,
     pub body: TypedModel,
     decluttered: bool,
     pub seq_length_input_slot: Option<usize>,
     pub input_mapping: Vec<InputMapping<TDim>>,
     pub output_mapping: Vec<OutputMapping<TDim, TDim>>,
+    pub backward: bool,
 }
 
-tract_linalg::impl_dyn_hash!(TypedScan);
+tract_linalg::impl_dyn_hash!(Scan);
 
-impl TypedScan {
-    pub fn to_codegen_op(&self) -> TractResult<Codegen> {
-        trace!("Optimizing(Codegen) inner model");
-        let plan = SimplePlan::new(self.body.clone().into_optimized()?)?;
-        trace!("Optimizing(Codegen) inner model done");
+impl Scan {
+    pub fn to_codegen_op(&self, optimize_inner: bool) -> TractResult<LirScan> {
+        let mut model = self.body.clone();
+        if optimize_inner {
+            model = model.into_optimized()?
+        }
+        let plan = SimplePlan::new(model)?;
         let input_mapping = self
             .input_mapping
             .iter()
@@ -52,8 +55,9 @@ impl TypedScan {
             })
             .collect::<TractResult<_>>()?;
 
-        Ok(Codegen::new(Arc::new(CodegenOpParams::new(
+        Ok(LirScan::new(Arc::new(LirScanOpParams::new(
             self.skip,
+            self.backward,
             Arc::new(plan),
             input_mapping,
             output_mapping,
@@ -65,16 +69,18 @@ impl TypedScan {
         input_mapping: Vec<InputMapping<TDim>>,
         output_mapping: Vec<OutputMapping<TDim, TDim>>,
         seq_length_input_slot: Option<usize>,
-    ) -> TractResult<TypedScan> {
+        backward: bool,
+    ) -> TractResult<Scan> {
         assert_eq!(input_mapping.len(), body.input_outlets()?.len());
         assert_eq!(output_mapping.len(), body.output_outlets()?.len());
-        Ok(TypedScan {
+        Ok(Scan {
             skip: 0,
             body,
             decluttered: false,
             input_mapping,
             output_mapping,
             seq_length_input_slot,
+            backward,
         })
     }
 
@@ -238,6 +244,7 @@ impl TypedScan {
                     input_mapping: new_mappings,
                     decluttered: true,
                     output_mapping: self.output_mapping.clone(),
+                    backward: self.backward,
                 };
                 return Ok(Some(TypedModelPatch::replace_single_op(model, node, &new_inputs, op)?));
             }
@@ -312,7 +319,7 @@ impl TypedScan {
                             .collect::<TractResult<TVec<_>>>()?;
                         let input = patch_inputs[slot];
                         let new_input_wire = outside_patch.wire_node(
-                            format!("{}-extracted-{}", node.name, successor_node.name),
+                            format!("{}.extracted.{}", node.name, successor_node.name),
                             successor_node.op.clone(),
                             &[input],
                         )?[0];
@@ -323,17 +330,19 @@ impl TypedScan {
 
                         let mut new_body = self.body.clone();
                         let new_source_wire = new_body.add_source(
-                            format!("{}-extracted-{}", node.name, successor_node.name),
+                            format!("{}.extracted.{}", node.name, successor_node.name),
                             new_input_inner_fact,
                         )?;
                         let mut inner_patch = TypedModelPatch::default();
                         let new_source_wire_in_patch =
                             inner_patch.tap_model(&new_body, new_source_wire)?;
-                        inner_patch.shunt_outside(
-                            &new_body,
-                            OutletId::new(successor.node, 0),
-                            new_source_wire_in_patch,
-                        ).chain_err(|| "patching inner model")?;
+                        inner_patch
+                            .shunt_outside(
+                                &new_body,
+                                OutletId::new(successor.node, 0),
+                                new_source_wire_in_patch,
+                            )
+                            .chain_err(|| "patching inner model")?;
                         inner_patch.apply(&mut new_body)?;
 
                         let mut input_mapping = self.input_mapping.clone();
@@ -350,15 +359,14 @@ impl TypedScan {
                             body: new_body,
                             skip: self.skip,
                             seq_length_input_slot: self.seq_length_input_slot,
+                            backward: self.backward,
                         };
                         let output_wires =
                             outside_patch.wire_node(&*node.name, new_op, &patch_inputs)?;
                         for w in output_wires {
-                            outside_patch.shunt_outside(
-                                model,
-                                OutletId::new(node.id, w.slot),
-                                w,
-                            ).chain_err(|| "patching outer model")?;
+                            outside_patch
+                                .shunt_outside(model, OutletId::new(node.id, w.slot), w)
+                                .chain_err(|| "patching outer model")?;
                         }
                         return Ok(Some(outside_patch));
                     }
@@ -406,6 +414,7 @@ impl TypedScan {
                 body: fixed_body,
                 skip: self.skip,
                 seq_length_input_slot: self.seq_length_input_slot,
+                backward: self.backward,
             };
             let scan_outputs = outside_patch.wire_node(&*node.name, new_op, &*inputs)?;
             let wire = outside_patch.wire_node(
@@ -527,7 +536,7 @@ impl TypedScan {
                 }
             };
         }
-        let op = Some(Box::new(TypedScan {
+        let op = Some(Box::new(Scan {
             body,
             input_mapping,
             output_mapping,
@@ -538,9 +547,9 @@ impl TypedScan {
     }
 }
 
-impl Op for TypedScan {
+impl Op for Scan {
     fn name(&self) -> Cow<str> {
-        "Scan::Typed".into()
+        "Scan".into()
     }
 
     fn info(&self) -> TractResult<Vec<String>> {
@@ -567,21 +576,23 @@ impl Op for TypedScan {
         Validation::Rounding
     }
 
+    op_core_mir!();
+    canonic!();
     op_as_typed_op!();
     op_as_pulsed_op!();
 }
 
-impl StatefullOp for TypedScan {
+impl StatefullOp for Scan {
     fn state(
         &self,
         session: &mut SessionState,
         node_id: usize,
     ) -> TractResult<Option<Box<dyn OpState>>> {
-        self.to_codegen_op()?.state(session, node_id)
+        self.to_codegen_op(false)?.state(session, node_id)
     }
 }
 
-impl TypedOp for TypedScan {
+impl TypedOp for Scan {
     as_op!();
 
     fn output_facts(&self, inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
@@ -656,10 +667,11 @@ impl TypedOp for TypedScan {
     ) -> TractResult<Option<AxisChangeConsequence>> {
         let body_leading_outlet = match io {
             InOut::In(ix) => {
-                if let Some(input) = self.input_mapping.iter().position(|im| im.slot() == Some(ix)) {
+                if let Some(input) = self.input_mapping.iter().position(|im| im.slot() == Some(ix))
+                {
                     self.body.input_outlets()?[input]
                 } else {
-                    return Ok(None)
+                    return Ok(None);
                 }
             }
             InOut::Out(ix) => {
@@ -704,6 +716,9 @@ impl TypedOp for TypedScan {
         mapping: &HashMap<OutletId, OutletId>,
         _pulse: usize,
     ) -> TractResult<TVec<OutletId>> {
+        if self.backward {
+            bail!("Can not pulsify a backward scan.")
+        }
         for input_id in 0..node.inputs.len() {
             let input = mapping[&node.inputs[input_id]];
             let input_fact = target.outlet_fact(input)?;
@@ -727,8 +742,8 @@ impl TypedOp for TypedScan {
         target.wire_node(&*node.name, op, &pulse_inputs)
     }
 
-    fn nested_model_multipliers(&self, inputs: &[&TypedFact]) -> Vec<(Cow<str>, f32)> {
-        self.to_codegen_op()
+    fn nested_model_multipliers(&self, inputs: &[&TypedFact]) -> Vec<(Cow<str>, f64)> {
+        self.to_codegen_op(false)
             .unwrap()
             .nested_model_multipliers(inputs)
             .into_iter()
@@ -745,12 +760,12 @@ impl TypedOp for TypedScan {
             &model,
             node,
             &node.inputs,
-            self.to_codegen_op()?,
+            self.to_codegen_op(true)?,
         )?))
     }
 }
 
-impl PulsedOp for TypedScan {
+impl PulsedOp for Scan {
     fn pulsed_output_facts(&self, inputs: &[&PulsedFact]) -> TractResult<TVec<PulsedFact>> {
         let (output_body_ix, output_mapping) = self
             .output_mapping

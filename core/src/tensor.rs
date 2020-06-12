@@ -229,6 +229,21 @@ impl Tensor {
         Ok(())
     }
 
+    pub fn broadcast_into_rank(mut self, rank: usize) -> TractResult<Tensor> {
+        self.broadcast_to_rank(rank)?;
+        Ok(self)
+    }
+
+    pub fn broadcast_to_rank(&mut self, rank: usize) -> TractResult<()> {
+        if rank < self.rank() {
+            bail!("Can only broadcast to higher rank")
+        }
+        while self.shape.len() < rank {
+            self.shape.insert(0, 1)
+        }
+        Ok(())
+    }
+
     /// Get the datum type of the tensor.
     pub fn datum_type(&self) -> DatumType {
         self.dt
@@ -448,6 +463,16 @@ impl Tensor {
             (I32, I64) => self.cast::<i32, i64>()?,
             (I64, I32) => self.cast::<i64, i32>()?,
 
+            (I8, Bool) => self.cast::<i8, bool>()?,
+            (I16, Bool) => self.cast::<i16, bool>()?,
+            (I32, Bool) => self.cast::<i32, bool>()?,
+            (I64, Bool) => self.cast::<i64, bool>()?,
+
+            (Bool, I8) => self.cast::<bool, i8>()?,
+            (Bool, I16) => self.cast::<bool, i16>()?,
+            (Bool, I32) => self.cast::<bool, i32>()?,
+            (Bool, I64) => self.cast::<bool, i64>()?,
+
             (Bool, F32) => self.cast::<bool, f32>()?,
             (I8, F32) => self.cast::<i8, f32>()?,
             (I16, F32) => self.cast::<i16, f32>()?,
@@ -464,6 +489,8 @@ impl Tensor {
             (U16, F32) => self.cast::<u16, f32>()?,
             (U8, I32) => self.cast::<u8, i32>()?,
             (U16, I32) => self.cast::<u16, i32>()?,
+
+            (U8, I64) => self.cast::<u8, i64>()?,
 
             (F32, Bool) => self.cast::<f32, bool>()?,
             (F32, I8) => self.cast::<f32, i8>()?,
